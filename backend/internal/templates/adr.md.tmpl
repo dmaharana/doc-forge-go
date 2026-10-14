@@ -1,0 +1,44 @@
+# ADR: {{.Title}}
+
+- **Status**: Proposed / Under Review
+- **Date**: {{.Date}}
+- **Project**: {{.ProjectName}}
+- **Source References**: {{range .Sources}}{{.Name}}, {{end}}
+
+---
+
+## 1. Context & Problem Statement
+{{.Summary}}
+
+Why does this architectural decision need to be made? What are the technological, operational, or business constraints?
+
+## 2. Decision Drivers
+- Hard to reverse: The cost of altering this architecture later is significant.
+- Simplicity and maintainability: Minimal runtime operational overhead and zero unnecessary dependencies.
+- Security and compliance: Strict data boundaries and encrypted secrets.
+
+## 3. Considered Options
+1. **Option A**: Proposed architecture based on codebase conventions and proven patterns.
+2. **Option B**: Alternative distributed or third-party hosted approach.
+
+## 4. Decision Outcome
+Chosen Option: **Option A**, because it delivers the optimal balance of simplicity, developer ergonomics, and verifiable operational characteristics.
+
+### 4.1 Positive Consequences
+- Streamlined deployment model (single self-contained binary or container).
+- Direct developer transparency with clear failure modes.
+
+### 4.2 Negative Consequences / Trade-offs
+- Requires disciplined handling of local file persistence and backup procedures.
+
+## 5. Pros and Cons of Considered Options
+### Option A
+- Good: Tight integration with existing standard library patterns.
+- Bad: Requires explicit internal queue polling instead of managed cloud messaging.
+
+### Option B
+- Good: Fully managed cloud infrastructure.
+- Bad: Introduces operational cost, latency, and vendor lock-in.
+
+## 6. Validation & Verification
+How this decision is validated in automated test suites and operational health checks.

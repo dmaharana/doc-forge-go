@@ -1,0 +1,33 @@
+# Release Notes: {{.Title}}
+
+**Project**: {{.ProjectName}}  
+**Release Date**: {{.Date}}  
+**Baseline Version**: v1.0.0  
+**Compiled From**: {{range .Sources}}{{.Name}}, {{end}}
+
+---
+
+## 🚀 Highlights & Overview
+{{.Summary}}
+
+## 📦 What's New & Features
+- **Core Capability**: Synthesized baseline implementation matching project specification.
+- **Data & Storage**: Pure-Go zero-dependency storage engine with encrypted at-rest credentials.
+- **Workflow Automation**: Asynchronous background generation, review loops, and publication targets.
+
+## 🛠️ Enhancements & Improvements
+- Strict input validation and structured error responses across all API endpoints.
+- Mobile-responsive desktop-first UI with sticky action controls and dedicated feedback panels.
+- Automated health tracking and structured logging.
+
+## 🔒 Security & Bug Fixes
+- Hard gate enforcement preventing approval of artifacts with unresolved blocking feedback.
+- AES-256 GCM cryptographic protection for external API tokens, secrets, and webhooks.
+
+## 📋 Upgrade & Migration Guide
+1. Ensure configuration environment variables (`JWT_SECRET`, `ENCRYPTION_KEY`, `DB_PATH`) are set.
+2. Launch service binary; SQLite database schema and administrator credentials migrate automatically.
+3. Access web interface and verify project source connectivity.
+
+## ⚠️ Known Limitations
+- [INFERRED] Verify specific rate limits and quotas for configured third-party LLM providers.

@@ -1,0 +1,49 @@
+# Runbook: {{.Title}}
+
+**Service / Component**: {{.ProjectName}}  
+**System Tier**: Mission Critical  
+**Last Verified**: {{.Date}}  
+**Owner / Escalation Team**: Engineering & Operations  
+
+---
+
+## 1. System Overview
+{{.Summary}}
+
+## 2. Architecture & Dependencies
+- **Core Runtime**: Go statically linked binary (`CGO_ENABLED=0`).
+- **Database**: SQLite WAL mode with automatic busy retry and foreign key constraints.
+- **External Dependencies**: LLM Provider API, Confluence Cloud REST API v2, Microsoft Teams Webhook.
+
+## 3. Routine Operations & Maintenance
+### 3.1 Service Start / Stop
+```bash
+# Start service with environment file
+./server
+
+# Check health endpoint
+curl -i http://localhost:8080/health
+```
+
+### 3.2 Database Backup & Retention
+```bash
+# SQLite online safe backup
+sqlite3 ./docforge.db ".backup ./docforge_backup_$(date +%Y%m%d).db"
+```
+
+## 4. Incident Response & Troubleshooting
+### 4.1 Symptom: Generation Job Remains in `queued`
+- **Cause**: Background worker goroutine pool starvation or process restart during execution.
+- **Remediation**: Inspect server logs for `[WORKER]` panic or retry messages; worker automatically resumes pending jobs on startup.
+
+### 4.2 Symptom: Confluence Export Fails
+- **Cause**: Expired OAuth access token or missing permissions in target space.
+- **Remediation**: Have user reconnect Atlassian account in Settings, or download documentation directly as Markdown files.
+
+### 4.3 Symptom: Blocking Feedback Prevents Approval
+- **Cause**: Reviewer flagged critical technical inconsistency (`is_blocking = 1`).
+- **Remediation**: Address feedback using "Update with Feedback" AI revision loop, or have authorized reviewer dismiss the feedback.
+
+## 5. Escalation Contacts & Runbook Verification
+- Primary On-Call: Platform Engineering
+- Secondary On-Call: Project Technical Lead

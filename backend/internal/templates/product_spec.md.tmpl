@@ -1,0 +1,46 @@
+# Product & Feature Specification: {{.Title}}
+
+**Project**: {{.ProjectName}}  
+**Generated Date**: {{.Date}}  
+**Status**: DRAFT / IN REVIEW  
+**Ground Truth Sources**: {{range .Sources}}{{.Name}} ({{.Type}}), {{end}}
+
+---
+
+## 1. Executive Summary & Vision
+{{.Summary}}
+
+## 2. Problem Statement & User Personas
+### 2.1 Problem Statement
+Describe the core pain points solved by this feature set based on source evidence.
+
+### 2.2 Target Personas & Stakeholders
+- **Primary Persona**: End users interacting with the technical workflows.
+- **Secondary Persona**: Operations and platform engineers maintaining stability.
+
+## 3. Scope & Functional Requirements
+### 3.1 In-Scope Capabilities
+- [x] High-authority functionality extracted directly from codebase, API schemas, and specifications.
+- [x] Input validation, execution boundaries, and transactional state flows.
+
+### 3.2 Out of Scope (Non-Goals)
+Clarify features, integrations, or edge conditions intentionally deferred.
+
+## 4. System Architecture & Workflows
+### 4.1 High-Level Architecture
+```
+[Client / API Caller] ──> [DocForge Ingestion Gateway] ──> [Worker Pipeline] ──> [Output / Storage]
+```
+
+### 4.2 Data Flow & Processing Lifecycle
+1. Source extraction and content normalization.
+2. Template-constrained generation and verification checks.
+3. Review gates and approval before release.
+
+## 5. Non-Functional Requirements & Security
+- **Reliability & Availability**: Deterministic processing and idempotent retry semantics.
+- **Security & Data Privacy**: At-rest encryption of secrets using AES-GCM; role-based access control.
+- **Performance**: Predictable response bounds and async processing for long-running workflows.
+
+## 6. Open Items & Inferred Elements
+> [!NOTE] Items flagged with `[INFERRED]` or `[MISSING]` require explicit technical SME verification during the review gate.
