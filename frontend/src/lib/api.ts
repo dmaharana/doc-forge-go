@@ -1,6 +1,7 @@
 import type {
   AtlassianPage,
   AtlassianSpace,
+  CompletenessScorecard,
   ConfluenceTarget,
   DocumentFeedback,
   DocumentItem,
@@ -8,10 +9,12 @@ import type {
   FeedbackCategory,
   FeedbackStatus,
   Generation,
+  GenerationStage,
   LLMConfig,
   NotificationPreference,
   Project,
   ProjectMember,
+  ProjectTokenSummary,
   Source,
   User,
 } from '@/types';
@@ -99,7 +102,7 @@ export const api = {
     });
   },
 
-  async adminUpdateUser(id: string, data: { name: string; role: string; is_active: boolean }): Promise<User> {
+  async adminUpdateUser(id: string, data: { name?: string; role?: string; is_active?: boolean }): Promise<User> {
     return request<User>(`/admin/users/${id}`, {
       method: 'PUT',
       body: JSON.stringify(data),
@@ -118,12 +121,17 @@ export const api = {
     });
   },
 
+  // Available LLM Configs (for project association and selection)
+  async getLLMConfigs(): Promise<LLMConfig[]> {
+    return request<LLMConfig[]>('/llm/configs');
+  },
+
   // Projects
   async listProjects(): Promise<Project[]> {
     return request<Project[]>('/projects');
   },
 
-  async createProject(data: { name: string; description: string }): Promise<Project> {
+  async createProject(data: { name: string; description: string; llm_config_id?: string }): Promise<Project> {
     return request<Project>('/projects', {
       method: 'POST',
       body: JSON.stringify(data),
@@ -134,7 +142,7 @@ export const api = {
     return request<Project>(`/projects/${id}`);
   },
 
-  async updateProject(id: string, data: { name: string; description: string; status: string }): Promise<Project> {
+  async updateProject(id: string, data: { name?: string; description?: string; status?: string; llm_config_id?: string | null }): Promise<Project> {
     return request<Project>(`/projects/${id}`, {
       method: 'PUT',
       body: JSON.stringify(data),
@@ -188,6 +196,18 @@ export const api = {
 
   async getGeneration(id: string): Promise<Generation> {
     return request<Generation>(`/generations/${id}`);
+  },
+
+  async getGenerationStages(generationId: string): Promise<GenerationStage[]> {
+    return request<GenerationStage[]>(`/generations/${generationId}/stages`);
+  },
+
+  async getProjectCompleteness(projectId: string): Promise<CompletenessScorecard> {
+    return request<CompletenessScorecard>(`/projects/${projectId}/completeness`);
+  },
+
+  async getProjectTokenUsage(projectId: string): Promise<ProjectTokenSummary> {
+    return request<ProjectTokenSummary>(`/projects/${projectId}/token-usage`);
   },
 
   // Documents

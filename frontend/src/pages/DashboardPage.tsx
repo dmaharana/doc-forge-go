@@ -12,6 +12,7 @@ import {
   RefreshCw,
   Sparkles,
   Layers,
+  Zap,
 } from 'lucide-react';
 
 interface DashboardPageProps {
@@ -26,18 +27,18 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate }) => {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectDesc, setNewProjectDesc] = useState('');
+  const [newProjectLLM, setNewProjectLLM] = useState('');
   const [creating, setCreating] = useState(false);
 
   const loadData = async () => {
     setLoading(true);
     try {
-      const projList = await api.listProjects();
+      const [projList, llms] = await Promise.all([
+        api.listProjects(),
+        api.getLLMConfigs().catch(() => []),
+      ]);
       setProjects(projList || []);
-
-      if (isAdmin) {
-        const llms = await api.adminListLLM();
-        setLlmConfigs(llms || []);
-      }
+      setLlmConfigs(llms || []);
     } catch (err) {
       console.error('Failed to load dashboard data:', err);
     } finally {
@@ -57,10 +58,12 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate }) => {
       const created = await api.createProject({
         name: newProjectName,
         description: newProjectDesc,
+        llm_config_id: newProjectLLM || undefined,
       });
       setShowCreateModal(false);
       setNewProjectName('');
       setNewProjectDesc('');
+      setNewProjectLLM('');
       onNavigate('project-detail', created.id);
     } catch (err: any) {
       alert(err.message || 'Failed to create project');
@@ -178,13 +181,33 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate }) => {
                 className="group p-5 rounded-xl border bg-card hover:border-primary/50 hover:shadow-md transition cursor-pointer flex flex-col justify-between"
               >
                 <div className="space-y-2">
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between gap-1">
                     <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-secondary text-secondary-foreground uppercase">
                       {p.status}
                     </span>
-                    <span className="text-[11px] text-muted-foreground">
-                      {new Date(p.updated_at).toLocaleDateString()}
-                    </span>
+                    <div className="flex items-center gap-1.5 overflow-hidden">
+                      {p.total_tokens ? (
+                        <span
+                          className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-900 flex items-center gap-1 shrink-0"
+                          title="Cumulative Tokens Consumed"
+                        >
+                          <Zap className="h-2.5 w-2.5" />
+                          {p.total_tokens.toLocaleString()}
+                        </span>
+                      ) : null}
+                      {p.llm_model ? (
+                        <span
+                          className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-900 truncate max-w-[110px]"
+                          title={`Associated Model: ${p.llm_model} (${p.llm_provider || 'default'})`}
+                        >
+                          {p.llm_model}
+                        </span>
+                      ) : (
+                        <span className="text-[11px] text-muted-foreground whitespace-nowrap">
+                          {new Date(p.updated_at).toLocaleDateString()}
+                        </span>
+                      )}
+                    </div>
                   </div>
                   <h3 className="font-bold text-base text-foreground group-hover:text-primary transition line-clamp-1">
                     {p.name}
@@ -253,6 +276,27 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate }) => {
                   className="w-full px-3.5 py-2.5 rounded-lg border bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary"
                   placeholder="Explain what this product/service does to guide LLM synthesis..."
                 />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-xs font-semibold uppercase text-muted-foreground">
+                  Associated LLM Configuration (Optional)
+                </label>
+                <select
+                  value={newProjectLLM}
+                  onChange={(e) => setNewProjectLLM(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-lg border bg-background text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary"
+                >
+                  <option value="">-- Use System Default (Global Active LLM) --</option>
+                  {llmConfigs.map((cfg) => (
+                    <option key={cfg.id} value={cfg.id}>
+                      {cfg.provider.toUpperCase()} — {cfg.default_model} {cfg.is_active ? '★ (Global Default)' : ''}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-[11px] text-muted-foreground">
+                  Select a specific model provider for this project, or use the global default.
+                </p>
               </div>
 
               <div className="flex items-center justify-end gap-2 pt-2">

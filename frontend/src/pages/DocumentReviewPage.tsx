@@ -26,10 +26,47 @@ import {
   RefreshCw,
   Share2,
   ShieldAlert,
+  ShieldCheck,
   Sparkles,
   Tag,
   X,
 } from 'lucide-react';
+
+const renderWithHighlights = (children: React.ReactNode): React.ReactNode => {
+  if (typeof children === 'string') {
+    if (!children.includes('[INFERRED]') && !children.includes('[MISSING]')) {
+      return children;
+    }
+    const parts = children.split(/(\[INFERRED\]|\[MISSING\])/g);
+    return parts.map((part, i) => {
+      if (part === '[INFERRED]') {
+        return (
+          <span
+            key={i}
+            className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-mono font-bold bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 border border-amber-300 mr-1"
+          >
+            [INFERRED]
+          </span>
+        );
+      }
+      if (part === '[MISSING]') {
+        return (
+          <span
+            key={i}
+            className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-mono font-bold bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300 border border-red-300 mr-1"
+          >
+            [MISSING]
+          </span>
+        );
+      }
+      return part;
+    });
+  }
+  if (Array.isArray(children)) {
+    return children.map((c, i) => <React.Fragment key={i}>{renderWithHighlights(c)}</React.Fragment>);
+  }
+  return children;
+};
 
 interface DocumentReviewPageProps {
   documentId: string;
@@ -611,7 +648,15 @@ export const DocumentReviewPage: React.FC<DocumentReviewPageProps> = ({
               </div>
             ) : (
               <div className="max-w-4xl mx-auto prose prose-slate dark:prose-invert prose-headings:font-bold prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg prose-table:border prose-th:bg-muted/50 prose-th:p-2 prose-td:p-2 prose-code:font-mono prose-code:bg-muted prose-code:px-1 prose-code:py-0.5 prose-code:rounded">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={{
+                    p: ({ children }) => <p className="mb-4">{renderWithHighlights(children)}</p>,
+                    li: ({ children }) => <li>{renderWithHighlights(children)}</li>,
+                    td: ({ children }) => <td className="p-2">{renderWithHighlights(children)}</td>,
+                    th: ({ children }) => <th className="p-2">{renderWithHighlights(children)}</th>,
+                  }}
+                >
                   {displayContent}
                 </ReactMarkdown>
               </div>
@@ -798,8 +843,15 @@ export const DocumentReviewPage: React.FC<DocumentReviewPageProps> = ({
                   <p className="text-foreground leading-relaxed whitespace-pre-wrap">{fb.content}</p>
 
                   <div className="pt-2 border-t flex items-center justify-between text-[10px] text-muted-foreground">
-                    <span>
-                      {fb.author_name || 'Reviewer'} • {new Date(fb.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    <span className="flex items-center gap-1">
+                      {fb.author_name === 'System: Pre-Review Gate' ? (
+                        <span className="inline-flex items-center gap-1 font-semibold text-purple-600 dark:text-purple-400 bg-purple-100 dark:bg-purple-950/60 px-1.5 py-0.5 rounded text-[10px]">
+                          <ShieldCheck className="h-3 w-3" /> Pre-Review Gate
+                        </span>
+                      ) : (
+                        fb.author_name || 'Reviewer'
+                      )}{' '}
+                      • {new Date(fb.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                     </span>
 
                     <div className="flex items-center gap-1.5">

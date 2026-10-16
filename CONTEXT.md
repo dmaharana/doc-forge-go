@@ -44,3 +44,32 @@ _Avoid_: Collaborator, team member, participant
 An authenticated OAuth 2.0 session established via Atlassian SSO that supplies user identity claims and personal Confluence Cloud access tokens.
 _Avoid_: Login token, Confluence account, SSO profile
 
+**Source Chunk**:
+A semantically bounded, enriched fragment of a Source carrying structural metadata (originating file, line range, AST symbol, or section).
+_Avoid_: Snippet, text slice, segment, block
+
+**Retrieval Index**:
+An SQLite FTS5 full-text search index over Source Chunks scoped to a Project that provides deterministic BM25 ranking and structural filtering.
+_Avoid_: Vector store, database, cache, catalog
+
+**System Map**:
+A synthesized architectural overview (component hierarchy, data flow, configurations) generated before document population to serve as the structural anchor.
+_Avoid_: Summary, outline, blueprint
+
+**Generation Stage**:
+A discrete, auditable step within a multi-pass Generation pipeline (such as system mapping, section population, or pre-review verification) with persisted inputs and outputs.
+_Avoid_: Sub-job, phase, task, worker run
+
+**Pre-Review Check**:
+An automated deterministic or model-based verification rule executed on a synthesized Document prior to human review, which may auto-correct issues or create blocking Feedback.
+_Avoid_: Linter, test, automated test, validation step
+
+**Associated LLM**:
+The specific configured Language Model provider and model setting assigned to a Project as its default AI synthesis engine, which overrides the global default.
+_Avoid_: Project model, default AI, local model
+
+**Token Usage**:
+An immutable audit ledger record capturing prompt/input tokens, completion/output tokens, model, and operation type for all AI synthesis and revision events within a Project, used for financial chargeback and quota tracking.
+_Avoid_: Credit, cost metric, billing counter
+
+

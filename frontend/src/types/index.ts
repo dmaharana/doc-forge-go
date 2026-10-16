@@ -29,7 +29,11 @@ export interface Project {
   owner_id: string;
   owner_name?: string;
   status: string;
+  llm_config_id?: string;
+  llm_model?: string;
+  llm_provider?: string;
   user_role?: 'owner' | 'member' | 'admin';
+  total_tokens?: number;
   created_at: string;
   updated_at: string;
 }
@@ -80,10 +84,42 @@ export interface Generation {
   model_used?: string;
   error_message?: string;
   notification_sent_at?: string;
+  system_map_md?: string;
+  completeness_scorecard_json?: string;
   created_at: string;
   started_at?: string;
   completed_at?: string;
   source_ids?: string[];
+  total_tokens?: number;
+  stages?: GenerationStage[];
+}
+
+export interface CompletenessScorecard {
+  coverage_score: number;
+  has_entrypoint: boolean;
+  has_config: boolean;
+  has_api_endpoints: boolean;
+  has_data_models: boolean;
+  has_tests: boolean;
+  total_chunks: number;
+  total_symbols: number;
+  missing_areas: string[];
+}
+
+export type GenerationStageStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'skipped';
+
+export interface GenerationStage {
+  id: string;
+  generation_id: string;
+  stage_name: string;
+  status: GenerationStageStatus;
+  input_context?: string;
+  output_payload?: string;
+  tokens_used: number;
+  duration_ms: number;
+  error_message?: string;
+  created_at: string;
+  completed_at?: string;
 }
 
 export type DocumentStatus = 'draft' | 'in_review' | 'approved';
@@ -174,3 +210,29 @@ export interface NotificationPreference {
   teams_webhook_masked?: string;
   created_at: string;
 }
+
+export interface TokenUsage {
+  id: string;
+  project_id: string;
+  generation_id?: string;
+  document_id?: string;
+  stage_id?: string;
+  operation: string;
+  model_used: string;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  created_at: string;
+}
+
+export interface ProjectTokenSummary {
+  project_id: string;
+  total_tokens: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  events_count: number;
+  by_model: Record<string, number>;
+  by_operation: Record<string, number>;
+  recent_usage: TokenUsage[];
+}
+

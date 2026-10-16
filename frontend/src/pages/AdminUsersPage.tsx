@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import type { User, UserRole } from '@/types';
 import { api } from '@/lib/api';
-import { Plus, RefreshCw, Users } from 'lucide-react';
+import { useAuth } from '@/context/AuthContext';
+import { Plus, RefreshCw, ShieldCheck, Users } from 'lucide-react';
 
 export const AdminUsersPage: React.FC = () => {
+  const { user: currentUser } = useAuth();
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
@@ -33,6 +35,7 @@ export const AdminUsersPage: React.FC = () => {
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!name.trim() || !email.trim() || !password) return;
     setSubmitting(true);
     try {
       await api.adminCreateUser({ name, email, role, password });
@@ -49,18 +52,47 @@ export const AdminUsersPage: React.FC = () => {
     }
   };
 
-  const handleToggleActive = async (u: User) => {
+  const handleRoleToggle = async (u: User) => {
+    const newRole: UserRole = u.role === 'admin' ? 'user' : 'admin';
+    const action = newRole === 'admin' ? 'promote' : 'demote';
+
+    if (u.id === currentUser?.id && newRole === 'user') {
+      if (!confirm('Warning: You are demoting yourself from Administrator to standard User. Are you sure you want to proceed?')) {
+        return;
+      }
+    } else {
+      if (!confirm(`Are you sure you want to ${action} ${u.name || u.email} to ${newRole === 'admin' ? 'Administrator' : 'standard User'}?`)) {
+        return;
+      }
+    }
+
     try {
       await api.adminUpdateUser(u.id, {
-        name: u.name,
-        role: u.role,
+        role: newRole,
+      });
+      setUsers((prev) =>
+        prev.map((item) => (item.id === u.id ? { ...item, role: newRole } : item))
+      );
+    } catch (err: any) {
+      alert(err.message || `Failed to ${action} user`);
+    }
+  };
+
+  const handleToggleActive = async (u: User) => {
+    if (u.id === currentUser?.id && u.is_active) {
+      if (!confirm('Warning: You are deactivating your own account. Are you sure you want to proceed?')) {
+        return;
+      }
+    }
+    try {
+      await api.adminUpdateUser(u.id, {
         is_active: !u.is_active,
       });
       setUsers((prev) =>
         prev.map((item) => (item.id === u.id ? { ...item, is_active: !item.is_active } : item))
       );
     } catch (err: any) {
-      alert(err.message || 'Failed to update user');
+      alert(err.message || 'Failed to update user status');
     }
   };
 
@@ -104,17 +136,25 @@ export const AdminUsersPage: React.FC = () => {
               {users.map((u) => (
                 <tr key={u.id} className="hover:bg-muted/30">
                   <td className="py-3 px-4">
-                    <div className="font-bold text-foreground">{u.name}</div>
+                    <div className="font-bold text-foreground flex items-center gap-2">
+                      <span>{u.name}</span>
+                      {u.id === currentUser?.id && (
+                        <span className="text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded font-normal">
+                          You
+                        </span>
+                      )}
+                    </div>
                     <div className="text-muted-foreground text-[11px]">{u.email}</div>
                   </td>
                   <td className="py-3 px-4">
                     <span
-                      className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
                         u.role === 'admin'
                           ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
                           : 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300'
                       }`}
                     >
+                      {u.role === 'admin' && <ShieldCheck className="h-3 w-3" />}
                       {u.role}
                     </span>
                   </td>
@@ -133,16 +173,29 @@ export const AdminUsersPage: React.FC = () => {
                     {new Date(u.created_at).toLocaleDateString()}
                   </td>
                   <td className="py-3 px-4 text-right">
-                    <button
-                      onClick={() => handleToggleActive(u)}
-                      className={`px-3 py-1 rounded-lg border font-medium text-xs transition ${
-                        u.is_active
-                          ? 'border-destructive/30 text-destructive hover:bg-destructive/10'
-                          : 'border-emerald-500/30 text-emerald-600 hover:bg-emerald-50'
-                      }`}
-                    >
-                      {u.is_active ? 'Deactivate' : 'Activate'}
-                    </button>
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        onClick={() => handleRoleToggle(u)}
+                        className={`px-3 py-1 rounded-lg border font-medium text-xs transition ${
+                          u.role === 'admin'
+                            ? 'border-amber-500/30 text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-950/50'
+                            : 'border-blue-500/30 text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950/50'
+                        }`}
+                      >
+                        {u.role === 'admin' ? 'Demote to User' : 'Promote to Admin'}
+                      </button>
+
+                      <button
+                        onClick={() => handleToggleActive(u)}
+                        className={`px-3 py-1 rounded-lg border font-medium text-xs transition ${
+                          u.is_active
+                            ? 'border-destructive/30 text-destructive hover:bg-destructive/10'
+                            : 'border-emerald-500/30 text-emerald-600 hover:bg-emerald-50'
+                        }`}
+                      >
+                        {u.is_active ? 'Deactivate' : 'Activate'}
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}

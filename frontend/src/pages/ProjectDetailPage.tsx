@@ -2,20 +2,29 @@ import React, { useEffect, useState } from 'react';
 import type {
   AtlassianPage,
   AtlassianSpace,
+  CompletenessScorecard,
   ConfluenceTarget,
   DocumentItem,
   Generation,
+  GenerationStage,
+  LLMConfig,
   Project,
   ProjectMember,
   ProjectMemberRole,
+  ProjectTokenSummary,
   Source,
 } from '@/types';
 import { api } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import {
+  Activity,
   AlertCircle,
   ArrowLeft,
+  CheckCircle,
   CheckCircle2,
+  Clock,
+  Compass,
+  Cpu,
   Download,
   Eye,
   FileCode,
@@ -24,11 +33,14 @@ import {
   Info,
   Link as LinkIcon,
   RefreshCw,
+  ShieldCheck,
   Sparkles,
   Trash2,
   UploadCloud,
   UserPlus,
   Users,
+  X,
+  Zap,
 } from 'lucide-react';
 
 interface ProjectDetailPageProps {
@@ -98,15 +110,81 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
   const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>([]);
   const [submittingGen, setSubmittingGen] = useState(false);
 
+  // Completeness & Stage Inspection States
+  const [completeness, setCompleteness] = useState<CompletenessScorecard | null>(null);
+  const [loadingCompleteness, setLoadingCompleteness] = useState(false);
+  const [selectedGenForStages, setSelectedGenForStages] = useState<Generation | null>(null);
+  const [genStages, setGenStages] = useState<GenerationStage[]>([]);
+  const [loadingStages, setLoadingStages] = useState(false);
+  const [showSystemMapModal, setShowSystemMapModal] = useState<string | null>(null);
+
+  // LLM Config association
+  const [availableLLMs, setAvailableLLMs] = useState<LLMConfig[]>([]);
+  const [showLLMModal, setShowLLMModal] = useState(false);
+  const [selectedLLMId, setSelectedLLMId] = useState<string>('');
+  const [savingLLM, setSavingLLM] = useState(false);
+  const [selectedGenLLMId, setSelectedGenLLMId] = useState<string>('');
+
+  // Token Usage & Chargeback
+  const [tokenSummary, setTokenSummary] = useState<ProjectTokenSummary | null>(null);
+  const [showTokenLedgerModal, setShowTokenLedgerModal] = useState(false);
+
+  const handleOpenGenModal = async () => {
+    setSelectedSourceIds((sources || []).map((s) => s.id));
+    setSelectedGenLLMId(project?.llm_config_id || '');
+    setShowGenModal(true);
+    setLoadingCompleteness(true);
+    try {
+      const card = await api.getProjectCompleteness(projectId);
+      setCompleteness(card);
+    } catch (err) {
+      console.error('Failed to load completeness:', err);
+    } finally {
+      setLoadingCompleteness(false);
+    }
+  };
+
+  const handleViewStages = async (gen: Generation) => {
+    setSelectedGenForStages(gen);
+    setLoadingStages(true);
+    try {
+      const stages = await api.getGenerationStages(gen.id);
+      setGenStages(stages || []);
+    } catch (err) {
+      console.error(err);
+      setGenStages(gen.stages || []);
+    } finally {
+      setLoadingStages(false);
+    }
+  };
+
+  const handleSaveProjectLLM = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSavingLLM(true);
+    try {
+      const updated = await api.updateProject(projectId, {
+        llm_config_id: selectedLLMId || null,
+      });
+      setProject(updated);
+      setShowLLMModal(false);
+    } catch (err: any) {
+      alert(err.message || 'Failed to update associated LLM');
+    } finally {
+      setSavingLLM(false);
+    }
+  };
+
   const loadAll = async () => {
     try {
-      const [p, s, g, d, ct, m] = await Promise.all([
+      const [p, s, g, d, ct, m, llms, tokens] = await Promise.all([
         api.getProject(projectId),
         api.listSources(projectId),
         api.listGenerations(projectId),
         api.listDocuments(projectId),
         api.getProjectConfluenceTarget(projectId).catch(() => null),
         api.getProjectMembers(projectId).catch(() => []),
+        api.getLLMConfigs().catch(() => []),
+        api.getProjectTokenUsage(projectId).catch(() => null),
       ]);
       setProject(p);
       setSources(s || []);
@@ -114,6 +192,10 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
       setDocuments(d || []);
       setConfluenceTarget(ct);
       setMembers(m || []);
+      setAvailableLLMs(llms || []);
+      setTokenSummary(tokens);
+      setSelectedLLMId(p.llm_config_id || '');
+      setSelectedGenLLMId(p.llm_config_id || '');
       if (ct) {
         setSelectedSpaceKey(ct.space_key);
         setSelectedParentPageId(ct.parent_page_id || '');
@@ -275,12 +357,14 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
 
     const interval = setInterval(async () => {
       try {
-        const [gList, dList] = await Promise.all([
+        const [gList, dList, tokens] = await Promise.all([
           api.listGenerations(projectId),
           api.listDocuments(projectId),
+          api.getProjectTokenUsage(projectId).catch(() => null),
         ]);
         setGenerations(gList || []);
         setDocuments(dList || []);
+        if (tokens) setTokenSummary(tokens);
       } catch (err) {
         console.error('Polling error:', err);
       }
@@ -340,6 +424,7 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
       await api.submitGeneration(projectId, {
         template_set: selectedTemplates.join(','),
         source_ids: selectedSourceIds,
+        llm_config_id: selectedGenLLMId || undefined,
       });
       setShowGenModal(false);
       setActiveTab('generations');
@@ -401,10 +486,7 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
 
         <div className="flex items-center gap-2">
           <button
-            onClick={() => {
-              setSelectedSourceIds((sources || []).map((s) => s.id));
-              setShowGenModal(true);
-            }}
+            onClick={handleOpenGenModal}
             className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-primary text-primary-foreground font-semibold text-sm shadow hover:opacity-90 transition"
           >
             <Sparkles className="h-4 w-4" /> Request Generation
@@ -489,7 +571,7 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
       {/* TAB 1: OVERVIEW */}
       {activeTab === 'overview' && (
         <div className="space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <div className="p-5 border rounded-xl bg-card space-y-1">
               <span className="text-xs uppercase font-semibold text-muted-foreground">Sources Ingested</span>
               <div className="text-2xl font-bold">{sources.length}</div>
@@ -502,6 +584,39 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
               <p className="text-xs text-muted-foreground">Synthesized technical artifacts ready for review</p>
             </div>
 
+            {/* ASSOCIATED LLM CARD */}
+            <div
+              onClick={() => {
+                if (isOwnerOrAdmin) {
+                  setSelectedLLMId(project?.llm_config_id || '');
+                  setShowLLMModal(true);
+                }
+              }}
+              className={`p-5 border rounded-xl bg-card space-y-1 ${
+                isOwnerOrAdmin ? 'cursor-pointer hover:border-primary/40 hover:shadow-sm transition' : ''
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-xs uppercase font-semibold text-muted-foreground">Associated LLM</span>
+                {isOwnerOrAdmin && (
+                  <span className="text-[10px] text-primary font-semibold hover:underline">
+                    Configure
+                  </span>
+                )}
+              </div>
+              <div className="text-base font-bold flex items-center gap-1.5 truncate">
+                <Cpu className="h-4 w-4 text-indigo-500 shrink-0" />
+                <span className="truncate">
+                  {project?.llm_model ? project.llm_model : 'System Default'}
+                </span>
+              </div>
+              <p className="text-xs text-muted-foreground truncate">
+                {project?.llm_provider
+                  ? `Provider: ${project.llm_provider.toUpperCase()}`
+                  : 'Uses system active default LLM'}
+              </p>
+            </div>
+
             <div
               onClick={() => {
                 setActiveTab('confluence');
@@ -512,19 +627,96 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
               className="p-5 border rounded-xl bg-card space-y-1 cursor-pointer hover:border-primary/40 hover:shadow-sm transition"
             >
               <span className="text-xs uppercase font-semibold text-muted-foreground">Confluence Target</span>
-              <div className="text-lg font-bold flex items-center gap-1.5 truncate">
+              <div className="text-base font-bold flex items-center gap-1.5 truncate">
                 {confluenceTarget ? (
                   <>
-                    <Globe className="h-4 w-4 text-primary" />
+                    <Globe className="h-4 w-4 text-primary shrink-0" />
                     <span>Space: {confluenceTarget.space_key}</span>
                   </>
                 ) : (
                   <span className="text-muted-foreground text-sm font-normal">Not configured</span>
                 )}
               </div>
-              <p className="text-xs text-muted-foreground">
-                {confluenceTarget ? confluenceTarget.space_name : 'Click to configure Confluence target'}
+              <p className="text-xs text-muted-foreground truncate">
+                {confluenceTarget ? confluenceTarget.space_name : 'Click to configure target'}
               </p>
+            </div>
+          </div>
+
+          {/* TOKEN CONSUMPTION & CHARGEBACK SUMMARY */}
+          <div className="p-6 border rounded-xl bg-card space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b pb-4">
+              <div>
+                <h3 className="font-bold text-base flex items-center gap-2">
+                  <Zap className="h-5 w-5 text-amber-500" /> Token Usage & Chargeback
+                </h3>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Cumulative LLM token consumption across all multi-stage synthesis and feedback revisions for project chargeback
+                </p>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-muted-foreground">
+                  Events: <strong className="text-foreground">{tokenSummary?.events_count || 0}</strong>
+                </span>
+                {tokenSummary && tokenSummary.events_count > 0 && (
+                  <button
+                    onClick={() => setShowTokenLedgerModal(true)}
+                    className="text-xs px-3 py-1.5 rounded-lg border font-medium hover:bg-muted transition flex items-center gap-1.5"
+                  >
+                    View Audit Ledger
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div className="p-4 rounded-xl bg-muted/40 border space-y-1">
+                <span className="text-xs font-semibold uppercase text-muted-foreground">Total Tokens Used</span>
+                <div className="text-2xl font-black text-foreground">
+                  {(tokenSummary?.total_tokens || project?.total_tokens || 0).toLocaleString()}
+                </div>
+                <div className="text-[11px] text-muted-foreground flex items-center gap-2">
+                  <span>Input: <strong>{(tokenSummary?.total_input_tokens || 0).toLocaleString()}</strong></span>
+                  <span>•</span>
+                  <span>Output: <strong>{(tokenSummary?.total_output_tokens || 0).toLocaleString()}</strong></span>
+                </div>
+              </div>
+
+              <div className="p-4 rounded-xl bg-muted/40 border space-y-2">
+                <span className="text-xs font-semibold uppercase text-muted-foreground">Usage by Operation</span>
+                {tokenSummary && Object.keys(tokenSummary.by_operation || {}).length > 0 ? (
+                  <div className="space-y-1 text-xs">
+                    {Object.entries(tokenSummary.by_operation).map(([op, tok]) => (
+                      <div key={op} className="flex items-center justify-between">
+                        <span className="text-muted-foreground capitalize">
+                          {op.replace(/_/g, ' ')}
+                        </span>
+                        <span className="font-mono font-medium">{tok.toLocaleString()}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">No generation activity yet.</p>
+                )}
+              </div>
+
+              <div className="p-4 rounded-xl bg-muted/40 border space-y-2">
+                <span className="text-xs font-semibold uppercase text-muted-foreground">Usage by Model</span>
+                {tokenSummary && Object.keys(tokenSummary.by_model || {}).length > 0 ? (
+                  <div className="space-y-1 text-xs">
+                    {Object.entries(tokenSummary.by_model).map(([model, tok]) => (
+                      <div key={model} className="flex items-center justify-between">
+                        <span className="text-muted-foreground truncate max-w-[140px]" title={model}>
+                          {model}
+                        </span>
+                        <span className="font-mono font-medium">{tok.toLocaleString()}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">No model activity yet.</p>
+                )}
+              </div>
             </div>
           </div>
 
@@ -667,10 +859,7 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-bold">Generation Run History</h2>
             <button
-              onClick={() => {
-                setSelectedSourceIds((sources || []).map((s) => s.id));
-                setShowGenModal(true);
-              }}
+              onClick={handleOpenGenModal}
               className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-primary text-primary-foreground text-xs font-semibold shadow hover:opacity-90"
             >
               <Sparkles className="h-4 w-4" /> Request Generation
@@ -693,9 +882,11 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
                     <th className="py-3 px-4">Status</th>
                     <th className="py-3 px-4">Template Set</th>
                     <th className="py-3 px-4">Model Used</th>
+                    <th className="py-3 px-4">Tokens Used</th>
                     <th className="py-3 px-4">Requested By</th>
                     <th className="py-3 px-4">Requested At</th>
                     <th className="py-3 px-4">Completed At</th>
+                    <th className="py-3 px-4 text-right">Pipeline</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y text-xs">
@@ -722,6 +913,9 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
                       <td className="py-3 px-4 text-muted-foreground">
                         {g.model_used || 'Pending...'}
                       </td>
+                      <td className="py-3 px-4 font-mono text-muted-foreground">
+                        {g.total_tokens ? `${g.total_tokens.toLocaleString()} tok` : (g.status === 'completed' ? '—' : '...')}
+                      </td>
                       <td className="py-3 px-4 text-muted-foreground">
                         {g.requester_name || 'User'}
                       </td>
@@ -730,6 +924,24 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
                       </td>
                       <td className="py-3 px-4 text-muted-foreground">
                         {g.completed_at ? new Date(g.completed_at).toLocaleTimeString() : '—'}
+                      </td>
+                      <td className="py-3 px-4 text-right space-x-1.5 whitespace-nowrap">
+                        <button
+                          onClick={() => handleViewStages(g)}
+                          className="px-2 py-1 rounded border text-[11px] font-medium hover:bg-muted inline-flex items-center gap-1"
+                          title="Inspect Multi-Stage Pipeline Stages"
+                        >
+                          <Activity className="h-3 w-3" /> Stages
+                        </button>
+                        {g.system_map_md && (
+                          <button
+                            onClick={() => setShowSystemMapModal(g.system_map_md || null)}
+                            className="px-2 py-1 rounded border border-primary/30 text-primary text-[11px] font-medium hover:bg-primary/10 inline-flex items-center gap-1"
+                            title="View Stage 1 Synthesized Architecture System Map"
+                          >
+                            <Compass className="h-3 w-3" /> System Map
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -746,10 +958,7 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-bold">Synthesized Documents</h2>
             <button
-              onClick={() => {
-                setSelectedSourceIds((sources || []).map((s) => s.id));
-                setShowGenModal(true);
-              }}
+              onClick={handleOpenGenModal}
               className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-primary text-primary-foreground text-xs font-semibold shadow hover:opacity-90"
             >
               <Sparkles className="h-4 w-4" /> Synthesize New Drafts
@@ -1501,11 +1710,144 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
       {/* MODAL: REQUEST GENERATION */}
       {showGenModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
-          <div className="bg-card w-full max-w-lg border rounded-2xl shadow-2xl p-6 space-y-4">
-            <h2 className="text-lg font-bold flex items-center gap-2">
-              <Sparkles className="h-5 w-5 text-indigo-500" /> Request AI Documentation Generation
-            </h2>
+          <div className="bg-card w-full max-w-lg border rounded-2xl shadow-2xl p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b pb-3">
+              <h2 className="text-base font-bold flex items-center gap-2">
+                <Sparkles className="h-5 w-5 text-indigo-500" /> Request AI Documentation Generation
+              </h2>
+              <button
+                type="button"
+                onClick={() => setShowGenModal(false)}
+                className="text-muted-foreground hover:text-foreground p-1 rounded hover:bg-muted"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {/* Pre-Flight Architecture Completeness Scorecard */}
+            <div className="p-3.5 rounded-xl border bg-muted/30 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <ShieldCheck className="h-4 w-4 text-primary" />
+                  <span className="font-bold text-xs uppercase tracking-wider text-foreground">
+                    Pre-Flight Completeness Check
+                  </span>
+                </div>
+                {loadingCompleteness ? (
+                  <span className="text-[11px] text-muted-foreground flex items-center gap-1">
+                    <RefreshCw className="h-3 w-3 animate-spin" /> Scanning...
+                  </span>
+                ) : completeness ? (
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                      completeness.coverage_score >= 80
+                        ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                        : completeness.coverage_score >= 50
+                        ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                        : 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300'
+                    }`}
+                  >
+                    {completeness.coverage_score}% Grounding Score
+                  </span>
+                ) : null}
+              </div>
+
+              {completeness && (
+                <div className="space-y-2 text-[11px]">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-1">
+                    <div className="flex items-center gap-1.5">
+                      {completeness.has_entrypoint ? (
+                        <CheckCircle className="h-3.5 w-3.5 text-emerald-600" />
+                      ) : (
+                        <AlertCircle className="h-3.5 w-3.5 text-amber-600" />
+                      )}
+                      <span>Entrypoints</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      {completeness.has_config ? (
+                        <CheckCircle className="h-3.5 w-3.5 text-emerald-600" />
+                      ) : (
+                        <AlertCircle className="h-3.5 w-3.5 text-amber-600" />
+                      )}
+                      <span>Configuration</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      {completeness.has_tests ? (
+                        <CheckCircle className="h-3.5 w-3.5 text-emerald-600" />
+                      ) : (
+                        <AlertCircle className="h-3.5 w-3.5 text-amber-600" />
+                      )}
+                      <span>Tests</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      {completeness.has_api_endpoints ? (
+                        <CheckCircle className="h-3.5 w-3.5 text-emerald-600" />
+                      ) : (
+                        <AlertCircle className="h-3.5 w-3.5 text-amber-600" />
+                      )}
+                      <span>Endpoints</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      {completeness.has_data_models ? (
+                        <CheckCircle className="h-3.5 w-3.5 text-emerald-600" />
+                      ) : (
+                        <AlertCircle className="h-3.5 w-3.5 text-amber-600" />
+                      )}
+                      <span>Models</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 text-muted-foreground">
+                      <Compass className="h-3.5 w-3.5 text-indigo-500" />
+                      <span>{completeness.total_symbols} AST Symbols</span>
+                    </div>
+                  </div>
+
+                  {completeness.missing_areas && completeness.missing_areas.length > 0 && (
+                    <div className="p-2 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-amber-800 dark:text-amber-300">
+                      <div className="font-semibold flex items-center gap-1">
+                        <AlertCircle className="h-3 w-3" /> Flagged Missing Areas:
+                      </div>
+                      <ul className="list-disc list-inside mt-0.5 space-y-0.5 text-[10px]">
+                        {completeness.missing_areas.map((area, idx) => (
+                          <li key={idx}>{area}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
             <form onSubmit={handleSubmitGeneration} className="space-y-4 text-xs">
+              {/* LLM Selection for this run */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="font-semibold uppercase text-muted-foreground block text-[11px]">
+                    AI Model for this Run:
+                  </label>
+                  {project?.llm_model && (
+                    <span className="text-[10px] text-muted-foreground">
+                      Project default: <strong className="text-foreground">{project.llm_model}</strong>
+                    </span>
+                  )}
+                </div>
+                <select
+                  value={selectedGenLLMId}
+                  onChange={(e) => setSelectedGenLLMId(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg border bg-background text-xs focus:ring-1 focus:ring-primary"
+                >
+                  <option value="">
+                    {project?.llm_model
+                      ? `Project Associated: ${project.llm_model} (${project.llm_provider?.toUpperCase()})`
+                      : '-- Use System Active Default LLM --'}
+                  </option>
+                  {availableLLMs.map((cfg) => (
+                    <option key={cfg.id} value={cfg.id}>
+                      {cfg.provider.toUpperCase()} — {cfg.default_model} {cfg.is_active ? '(Global Default)' : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               <div className="space-y-2">
                 <label className="font-semibold uppercase text-muted-foreground block">
                   Select Document Templates to Synthesize:
@@ -1636,6 +1978,293 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
                 Close Preview
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: GENERATION STAGES INSPECTOR */}
+      {selectedGenForStages && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
+          <div className="bg-card w-full max-w-xl border rounded-2xl shadow-2xl p-6 space-y-4 max-h-[85vh] flex flex-col">
+            <div className="flex items-center justify-between border-b pb-3">
+              <div>
+                <h2 className="text-base font-bold flex items-center gap-2">
+                  <Activity className="h-5 w-5 text-primary" /> Pipeline Execution Stages
+                </h2>
+                <div className="text-xs text-muted-foreground font-mono">
+                  Job: {selectedGenForStages.id.slice(0, 8)}... • Template: {selectedGenForStages.template_set}
+                </div>
+              </div>
+              <button
+                onClick={() => setSelectedGenForStages(null)}
+                className="text-muted-foreground hover:text-foreground p-1 rounded hover:bg-muted"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-3">
+              {loadingStages ? (
+                <div className="p-8 text-center text-muted-foreground flex items-center justify-center gap-2 text-xs">
+                  <RefreshCw className="h-4 w-4 animate-spin" /> Loading stage execution log...
+                </div>
+              ) : genStages.length === 0 ? (
+                <div className="p-8 text-center text-muted-foreground text-xs">
+                  No individual stage execution metrics recorded for this run.
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {genStages.map((st, idx) => (
+                    <div
+                      key={st.id || st.stage_name}
+                      className="p-3.5 rounded-xl border bg-muted/20 flex flex-col gap-2"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-semibold text-xs capitalize flex items-center gap-2">
+                          <span className="font-mono text-[10px] text-muted-foreground">
+                            #{idx + 1}
+                          </span>
+                          {st.stage_name.replace(/_/g, ' ')}
+                        </span>
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                            st.status === 'completed'
+                              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                              : st.status === 'processing'
+                              ? 'bg-blue-100 text-blue-800 animate-pulse'
+                              : st.status === 'failed'
+                              ? 'bg-red-100 text-red-800'
+                              : 'bg-muted text-muted-foreground'
+                          }`}
+                        >
+                          {st.status}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                        <span className="flex items-center gap-1">
+                          <Clock className="h-3 w-3" /> Duration: {st.duration_ms ? `${st.duration_ms} ms` : '—'}
+                        </span>
+                        {st.tokens_used ? <span>{st.tokens_used.toLocaleString()} tokens</span> : null}
+                      </div>
+
+                      {st.error_message && (
+                        <div className="p-2 rounded bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400 text-[11px] font-mono">
+                          {st.error_message}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end pt-2 border-t">
+              <button
+                onClick={() => setSelectedGenForStages(null)}
+                className="px-4 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-semibold"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: SYSTEM ARCHITECTURE MAP */}
+      {showSystemMapModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
+          <div className="bg-card w-full max-w-2xl border rounded-2xl shadow-2xl p-6 space-y-4 max-h-[85vh] flex flex-col">
+            <div className="flex items-center justify-between border-b pb-3">
+              <h2 className="text-base font-bold flex items-center gap-2">
+                <Compass className="h-5 w-5 text-primary" /> Synthesized Architecture System Map (Stage 1)
+              </h2>
+              <button
+                onClick={() => setShowSystemMapModal(null)}
+                className="text-muted-foreground hover:text-foreground p-1 rounded hover:bg-muted"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto bg-muted/40 p-4 rounded-xl border text-xs font-mono whitespace-pre-wrap leading-relaxed">
+              {showSystemMapModal}
+            </div>
+            <div className="flex justify-end pt-2 border-t">
+              <button
+                onClick={() => setShowSystemMapModal(null)}
+                className="px-4 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-semibold"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: TOKEN USAGE AUDIT LEDGER */}
+      {showTokenLedgerModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
+          <div className="bg-card w-full max-w-3xl border rounded-2xl shadow-2xl p-6 space-y-4 max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between border-b pb-3">
+              <div>
+                <h2 className="text-base font-bold flex items-center gap-2">
+                  <Zap className="h-5 w-5 text-amber-500" /> Token Usage Audit Ledger
+                </h2>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Detailed event-by-event token ledger for <strong>{project.name}</strong> for financial chargeback and quota reconciliation.
+                </p>
+              </div>
+              <button
+                onClick={() => setShowTokenLedgerModal(false)}
+                className="text-muted-foreground hover:text-foreground p-1 rounded hover:bg-muted"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-muted/30 p-3 rounded-xl border text-xs">
+              <div>
+                <span className="text-muted-foreground text-[10px] uppercase font-semibold block">Total Tokens</span>
+                <span className="text-base font-bold text-foreground">{(tokenSummary?.total_tokens || 0).toLocaleString()}</span>
+              </div>
+              <div>
+                <span className="text-muted-foreground text-[10px] uppercase font-semibold block">Input / Prompt</span>
+                <span className="text-sm font-semibold text-foreground">{(tokenSummary?.total_input_tokens || 0).toLocaleString()}</span>
+              </div>
+              <div>
+                <span className="text-muted-foreground text-[10px] uppercase font-semibold block">Output / Completion</span>
+                <span className="text-sm font-semibold text-foreground">{(tokenSummary?.total_output_tokens || 0).toLocaleString()}</span>
+              </div>
+              <div>
+                <span className="text-muted-foreground text-[10px] uppercase font-semibold block">Total Events</span>
+                <span className="text-sm font-semibold text-foreground">{(tokenSummary?.events_count || 0).toLocaleString()}</span>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto border rounded-xl">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-muted/60 border-b text-[10px] uppercase font-semibold text-muted-foreground sticky top-0 bg-card">
+                  <tr>
+                    <th className="py-2.5 px-3">Timestamp</th>
+                    <th className="py-2.5 px-3">Operation</th>
+                    <th className="py-2.5 px-3">Model</th>
+                    <th className="py-2.5 px-3 text-right">Input</th>
+                    <th className="py-2.5 px-3 text-right">Output</th>
+                    <th className="py-2.5 px-3 text-right">Total Tokens</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y font-mono">
+                  {tokenSummary?.recent_usage && tokenSummary.recent_usage.length > 0 ? (
+                    tokenSummary.recent_usage.map((u) => (
+                      <tr key={u.id} className="hover:bg-muted/30 font-sans">
+                        <td className="py-2.5 px-3 text-muted-foreground text-[11px] whitespace-nowrap">
+                          {new Date(u.created_at).toLocaleString()}
+                        </td>
+                        <td className="py-2.5 px-3">
+                          <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-secondary text-secondary-foreground uppercase">
+                            {u.operation.replace(/_/g, ' ')}
+                          </span>
+                        </td>
+                        <td className="py-2.5 px-3 text-muted-foreground text-[11px]">
+                          {u.model_used}
+                        </td>
+                        <td className="py-2.5 px-3 text-right font-mono text-[11px] text-muted-foreground">
+                          {u.input_tokens.toLocaleString()}
+                        </td>
+                        <td className="py-2.5 px-3 text-right font-mono text-[11px] text-muted-foreground">
+                          {u.output_tokens.toLocaleString()}
+                        </td>
+                        <td className="py-2.5 px-3 text-right font-mono text-[11px] font-semibold text-foreground">
+                          {u.total_tokens.toLocaleString()}
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={6} className="py-8 text-center text-muted-foreground font-sans text-xs">
+                        No ledger entries found.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="flex justify-end pt-2 border-t">
+              <button
+                onClick={() => setShowTokenLedgerModal(false)}
+                className="px-4 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-semibold"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: ASSOCIATE LLM WITH PROJECT */}
+      {showLLMModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
+          <div className="bg-card w-full max-w-md border rounded-2xl shadow-2xl p-6 space-y-4">
+            <div className="flex items-center justify-between border-b pb-3">
+              <h2 className="text-base font-bold flex items-center gap-2">
+                <Cpu className="h-5 w-5 text-indigo-500" /> Associate LLM Configuration
+              </h2>
+              <button
+                onClick={() => setShowLLMModal(false)}
+                className="text-muted-foreground hover:text-foreground p-1 rounded hover:bg-muted"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveProjectLLM} className="space-y-4 text-xs">
+              <p className="text-muted-foreground leading-relaxed">
+                Associate a dedicated AI model with <strong>{project?.name}</strong>. All documentation generation,
+                system architecture mapping, and automated pre-review runs for this project will use this configuration by default.
+              </p>
+
+              <div className="space-y-1.5">
+                <label className="font-semibold uppercase text-muted-foreground block text-[11px]">
+                  Select Configured LLM Provider & Model:
+                </label>
+                <select
+                  value={selectedLLMId}
+                  onChange={(e) => setSelectedLLMId(e.target.value)}
+                  className="w-full px-3 py-2.5 rounded-lg border bg-background text-xs focus:ring-1 focus:ring-primary"
+                >
+                  <option value="">-- Use System Default (Global Active LLM) --</option>
+                  {availableLLMs.map((cfg) => (
+                    <option key={cfg.id} value={cfg.id}>
+                      {cfg.provider.toUpperCase()} — {cfg.default_model} {cfg.is_active ? '★ (Global Default)' : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {availableLLMs.length === 0 && (
+                <div className="p-3 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-amber-800 dark:text-amber-300">
+                  No LLM configs found. As an administrator, you can configure providers in <strong>Admin &gt; LLM Configuration</strong>.
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t">
+                <button
+                  type="button"
+                  onClick={() => setShowLLMModal(false)}
+                  className="px-3.5 py-1.5 rounded-lg border text-xs font-medium hover:bg-muted"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingLLM}
+                  className="px-4 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-semibold shadow hover:opacity-90 disabled:opacity-50"
+                >
+                  {savingLLM ? 'Saving...' : 'Save LLM Association'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

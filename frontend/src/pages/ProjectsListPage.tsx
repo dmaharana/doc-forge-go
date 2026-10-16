@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import type { Project } from '@/types';
 import { api } from '@/lib/api';
-import { ArrowRight, FolderGit2, Plus, Search } from 'lucide-react';
+import { ArrowRight, FolderGit2, Plus, Search, Zap } from 'lucide-react';
 
 interface ProjectsListPageProps {
   onNavigate: (view: string, id?: string) => void;
@@ -106,9 +106,20 @@ export const ProjectsListPage: React.FC<ProjectsListPageProps> = ({ onNavigate }
                   <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-secondary text-secondary-foreground uppercase">
                     {p.status}
                   </span>
-                  <span className="text-[11px] text-muted-foreground">
-                    {new Date(p.updated_at).toLocaleDateString()}
-                  </span>
+                  <div className="flex items-center gap-1.5">
+                    {p.total_tokens ? (
+                      <span
+                        className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-900 flex items-center gap-1"
+                        title="Cumulative Tokens Consumed"
+                      >
+                        <Zap className="h-2.5 w-2.5" />
+                        {p.total_tokens.toLocaleString()}
+                      </span>
+                    ) : null}
+                    <span className="text-[11px] text-muted-foreground">
+                      {new Date(p.updated_at).toLocaleDateString()}
+                    </span>
+                  </div>
                 </div>
                 <h3 className="font-bold text-base text-foreground group-hover:text-primary transition line-clamp-1">
                   {p.name}
