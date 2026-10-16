@@ -22,12 +22,15 @@ import (
 
 	"github.com/ledongthuc/pdf"
 	"github.com/xuri/excelize/v2"
+
+	"docforge/internal/models"
 )
 
 type ExtractionResult struct {
 	Text         string
 	MetadataJSON string
 	MimeType     string
+	Chunks       []models.SourceChunk
 }
 
 // ExtractFromFile inspects the file extension / content and parses plain text, pdf, xlsx, zip, or image
@@ -39,20 +42,20 @@ func ExtractFromFile(path, originalFilename string) (*ExtractionResult, error) {
 
 	switch ext {
 	case ".pdf":
-		return extractPDF(path)
+		return extractPDF(path, originalFilename)
 	case ".xlsx", ".xlsm", ".xltx", ".xltm":
-		return extractExcel(path)
+		return extractExcel(path, originalFilename)
 	case ".zip":
-		return extractZip(path)
+		return extractZip(path, originalFilename)
 	case ".png", ".jpg", ".jpeg", ".gif", ".webp":
-		return extractImage(path)
+		return extractImage(path, originalFilename)
 	default:
 		// Text / code / markdown
-		return extractText(path)
+		return extractText(path, originalFilename)
 	}
 }
 
-func extractText(path string) (*ExtractionResult, error) {
+func extractText(path, originalFilename string) (*ExtractionResult, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
@@ -65,14 +68,21 @@ func extractText(path string) (*ExtractionResult, error) {
 	}
 	metaJSON, _ := json.Marshal(meta)
 
+	name := originalFilename
+	if name == "" {
+		name = filepath.Base(path)
+	}
+	chunks := ChunkSource("", "", path, name, "text/plain", text)
+
 	return &ExtractionResult{
 		Text:         text,
 		MetadataJSON: string(metaJSON),
 		MimeType:     "text/plain",
+		Chunks:       chunks,
 	}, nil
 }
 
-func extractPDF(path string) (*ExtractionResult, error) {
+func extractPDF(path, originalFilename string) (*ExtractionResult, error) {
 	content, err := readPdf(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract pdf: %w", err)
@@ -84,10 +94,17 @@ func extractPDF(path string) (*ExtractionResult, error) {
 	}
 	metaJSON, _ := json.Marshal(meta)
 
+	name := originalFilename
+	if name == "" {
+		name = filepath.Base(path)
+	}
+	chunks := ChunkSource("", "", path, name, "application/pdf", content)
+
 	return &ExtractionResult{
 		Text:         content,
 		MetadataJSON: string(metaJSON),
 		MimeType:     "application/pdf",
+		Chunks:       chunks,
 	}, nil
 }
 
@@ -112,7 +129,7 @@ func readPdf(path string) (string, error) {
 	return buf.String(), nil
 }
 
-func extractExcel(path string) (*ExtractionResult, error) {
+func extractExcel(path, originalFilename string) (*ExtractionResult, error) {
 	f, err := excelize.OpenFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open excel file: %w", err)
@@ -150,14 +167,21 @@ func extractExcel(path string) (*ExtractionResult, error) {
 	}
 	metaJSON, _ := json.Marshal(meta)
 
+	name := originalFilename
+	if name == "" {
+		name = filepath.Base(path)
+	}
+	chunks := ChunkSource("", "", path, name, "text/markdown", sb.String())
+
 	return &ExtractionResult{
 		Text:         sb.String(),
 		MetadataJSON: string(metaJSON),
 		MimeType:     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		Chunks:       chunks,
 	}, nil
 }
 
-func extractZip(path string) (*ExtractionResult, error) {
+func extractZip(path, originalFilename string) (*ExtractionResult, error) {
 	r, err := zip.OpenReader(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open zip file: %w", err)
@@ -166,6 +190,7 @@ func extractZip(path string) (*ExtractionResult, error) {
 
 	var sb strings.Builder
 	var fileList []string
+	var allChunks []models.SourceChunk
 	totalFiles := 0
 
 	for _, f := range r.File {
@@ -188,9 +213,13 @@ func extractZip(path string) (*ExtractionResult, error) {
 			continue
 		}
 
+		fileContent := string(data)
 		sb.WriteString(fmt.Sprintf("\n--- File: %s ---\n```\n", f.Name))
-		sb.WriteString(string(data))
+		sb.WriteString(fileContent)
 		sb.WriteString("\n```\n")
+
+		fileChunks := ChunkSource("", "", f.Name, f.Name, "text/plain", fileContent)
+		allChunks = append(allChunks, fileChunks...)
 
 		fileList = append(fileList, f.Name)
 		totalFiles++
@@ -210,6 +239,7 @@ func extractZip(path string) (*ExtractionResult, error) {
 		Text:         sb.String(),
 		MetadataJSON: string(metaJSON),
 		MimeType:     "application/zip",
+		Chunks:       allChunks,
 	}, nil
 }
 
@@ -222,7 +252,7 @@ func isBinaryExt(ext string) bool {
 	}
 }
 
-func extractImage(path string) (*ExtractionResult, error) {
+func extractImage(path, originalFilename string) (*ExtractionResult, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -253,13 +283,25 @@ func extractImage(path string) (*ExtractionResult, error) {
 	}
 	metaJSON, _ := json.Marshal(meta)
 
-	description := fmt.Sprintf("[Image Reference: format=%s, dimensions=%dx%d, size_bytes=%d]\nBase64 Payload prefix: data:image/%s;base64,%s...",
-		format, width, height, len(imgBytes), format, safePrefix(b64Data, 64))
+	name := originalFilename
+	if name == "" {
+		name = filepath.Base(path)
+	}
+
+	visionRes, diagramChunk := ProcessImageDiagram(context.Background(), "", "", path, name, width, height, format)
+	var chunks []models.SourceChunk
+	if diagramChunk != nil {
+		chunks = append(chunks, *diagramChunk)
+	}
+
+	description := fmt.Sprintf("[Image Reference: format=%s, dimensions=%dx%d, size_bytes=%d]\nCaption: %s\nComponents: %s\nData Flow: %s\n\n```mermaid\n%s\n```\n\nBase64 Payload prefix: data:image/%s;base64,%s...",
+		format, width, height, len(imgBytes), visionRes.Caption, strings.Join(visionRes.Components, ", "), visionRes.DataFlow, visionRes.MermaidDiagram, format, safePrefix(b64Data, 64))
 
 	return &ExtractionResult{
 		Text:         description,
 		MetadataJSON: string(metaJSON),
 		MimeType:     fmt.Sprintf("image/%s", format),
+		Chunks:       chunks,
 	}, nil
 }
 
@@ -277,7 +319,7 @@ func FetchRemoteSource(ctx context.Context, remoteURL, remoteType string) (*Extr
 	case "git":
 		return fetchGitRepo(ctx, remoteURL)
 	case "local":
-		return extractText(remoteURL)
+		return extractText(remoteURL, filepath.Base(remoteURL))
 	case "http", "https", "web":
 		fallthrough
 	default:
@@ -319,10 +361,13 @@ func fetchHTTP(ctx context.Context, url string) (*ExtractionResult, error) {
 	}
 	metaJSON, _ := json.Marshal(meta)
 
+	chunks := ChunkSource("", "", url, filepath.Base(url), contentType, text)
+
 	return &ExtractionResult{
 		Text:         text,
 		MetadataJSON: string(metaJSON),
 		MimeType:     contentType,
+		Chunks:       chunks,
 	}, nil
 }
 
@@ -341,6 +386,7 @@ func fetchGitRepo(ctx context.Context, repoURL string) (*ExtractionResult, error
 
 	var sb strings.Builder
 	var filesRead []string
+	var allChunks []models.SourceChunk
 
 	err = filepath.Walk(tmpDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
@@ -357,7 +403,10 @@ func fetchGitRepo(ctx context.Context, repoURL string) (*ExtractionResult, error
 		rel, _ := filepath.Rel(tmpDir, path)
 		data, err := os.ReadFile(path)
 		if err == nil && len(data) < 100*1024 { // limit 100KB per file
-			sb.WriteString(fmt.Sprintf("\n### File: %s\n```\n%s\n```\n", rel, string(data)))
+			fileContent := string(data)
+			sb.WriteString(fmt.Sprintf("\n### File: %s\n```\n%s\n```\n", rel, fileContent))
+			fileChunks := ChunkSource("", "", rel, rel, "text/plain", fileContent)
+			allChunks = append(allChunks, fileChunks...)
 			filesRead = append(filesRead, rel)
 		}
 		if len(filesRead) > 50 {
@@ -376,6 +425,7 @@ func fetchGitRepo(ctx context.Context, repoURL string) (*ExtractionResult, error
 		Text:         sb.String(),
 		MetadataJSON: string(metaJSON),
 		MimeType:     "application/x-git",
+		Chunks:       allChunks,
 	}, nil
 }
 

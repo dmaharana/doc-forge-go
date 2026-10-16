@@ -27,6 +27,8 @@ type GenerationRequest struct {
 type GenerationResponse struct {
 	MarkdownContent string
 	ModelUsed       string
+	InputTokens     int
+	OutputTokens    int
 	TokensUsed      int
 }
 
@@ -44,12 +46,72 @@ type FeedbackRevisionResponse struct {
 	UpdatedMarkdown string
 	ChangeSummary   string
 	ModelUsed       string
+	InputTokens     int
+	OutputTokens    int
+	TokensUsed      int
+}
+
+type SystemMapRequest struct {
+	ProjectName string
+	Description string
+	Chunks      []models.SourceChunk
+	Model       string
+	Temperature float64
+	MaxTokens   int
+}
+
+type SystemMapResponse struct {
+	Markdown     string
+	ModelUsed    string
+	InputTokens  int
+	OutputTokens int
+	TokensUsed   int
+}
+
+type SectionGenerationRequest struct {
+	SectionTitle string
+	SectionGoal  string
+	SystemMap    string
+	TemplatePart string
+	ProjectName  string
+	Chunks       []models.SourceChunk
+	Model        string
+	Temperature  float64
+	MaxTokens    int
+}
+
+type SectionGenerationResponse struct {
+	Markdown     string
+	ModelUsed    string
+	InputTokens  int
+	OutputTokens int
+	TokensUsed   int
+}
+
+type SelfCorrectionRequest struct {
+	CurrentMarkdown string
+	Issues          []string
+	ProjectName     string
+	Model           string
+	Temperature     float64
+	MaxTokens       int
+}
+
+type SelfCorrectionResponse struct {
+	UpdatedMarkdown string
+	ModelUsed       string
+	InputTokens     int
+	OutputTokens    int
+	TokensUsed      int
 }
 
 type Provider interface {
 	Name() string
 	Generate(ctx context.Context, req GenerationRequest) (*GenerationResponse, error)
 	ReviseWithFeedback(ctx context.Context, req FeedbackRevisionRequest) (*FeedbackRevisionResponse, error)
+	GenerateSystemMap(ctx context.Context, req SystemMapRequest) (*SystemMapResponse, error)
+	GenerateSection(ctx context.Context, req SectionGenerationRequest) (*SectionGenerationResponse, error)
+	SelfCorrect(ctx context.Context, req SelfCorrectionRequest) (*SelfCorrectionResponse, error)
 }
 
 // Factory creates a provider based on config
@@ -129,11 +191,79 @@ type openAIChatResponse struct {
 		} `json:"message"`
 	} `json:"choices"`
 	Usage struct {
-		TotalTokens int `json:"total_tokens"`
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
 	} `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
+}
+
+func (p *OpenAIProvider) callChat(ctx context.Context, systemPrompt, userPrompt, model string, temperature float64, maxTokens int) (string, int, int, int, error) {
+	if model == "" {
+		model = p.defaultModel
+	}
+	if maxTokens == 0 {
+		maxTokens = 4096
+	}
+
+	body := openAIChatRequest{
+		Model: model,
+		Messages: []openAIChatMessage{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: userPrompt},
+		},
+		Temperature: temperature,
+		MaxTokens:   maxTokens,
+	}
+
+	jsonBytes, err := json.Marshal(body)
+	if err != nil {
+		return "", 0, 0, 0, err
+	}
+
+	url := fmt.Sprintf("%s/chat/completions", p.baseURL)
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBytes))
+	if err != nil {
+		return "", 0, 0, 0, err
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", p.apiKey))
+
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		return "", 0, 0, 0, fmt.Errorf("openai request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", 0, 0, 0, err
+	}
+
+	var chatResp openAIChatResponse
+	if err := json.Unmarshal(respBytes, &chatResp); err != nil {
+		return "", 0, 0, 0, fmt.Errorf("failed to decode response: %w (raw: %s)", err, string(respBytes))
+	}
+
+	if chatResp.Error != nil {
+		return "", 0, 0, 0, fmt.Errorf("openai api error: %s", chatResp.Error.Message)
+	}
+
+	if len(chatResp.Choices) == 0 {
+		return "", 0, 0, 0, fmt.Errorf("no choices returned from openai")
+	}
+
+	inTok := chatResp.Usage.PromptTokens
+	outTok := chatResp.Usage.CompletionTokens
+	totTok := chatResp.Usage.TotalTokens
+	if totTok == 0 && (inTok > 0 || outTok > 0) {
+		totTok = inTok + outTok
+	}
+
+	return cleanMarkdownOutput(chatResp.Choices[0].Message.Content), inTok, outTok, totTok, nil
 }
 
 func (p *OpenAIProvider) Generate(ctx context.Context, req GenerationRequest) (*GenerationResponse, error) {
@@ -150,63 +280,115 @@ GROUND TRUTH RULES:
 3. Adhere strictly to the requested Markdown template structure.`
 
 	userPrompt := buildGenerationUserPrompt(req)
-
-	body := openAIChatRequest{
-		Model: model,
-		Messages: []openAIChatMessage{
-			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: userPrompt},
-		},
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
-	}
-
-	if body.MaxTokens == 0 {
-		body.MaxTokens = 4096
-	}
-
-	jsonBytes, err := json.Marshal(body)
+	content, inTok, outTok, tokens, err := p.callChat(ctx, systemPrompt, userPrompt, model, req.Temperature, req.MaxTokens)
 	if err != nil {
 		return nil, err
-	}
-
-	url := fmt.Sprintf("%s/chat/completions", p.baseURL)
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBytes))
-	if err != nil {
-		return nil, err
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", p.apiKey))
-
-	resp, err := p.client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("openai request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	var chatResp openAIChatResponse
-	if err := json.Unmarshal(respBytes, &chatResp); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w (raw: %s)", err, string(respBytes))
-	}
-
-	if chatResp.Error != nil {
-		return nil, fmt.Errorf("openai api error: %s", chatResp.Error.Message)
-	}
-
-	if len(chatResp.Choices) == 0 {
-		return nil, fmt.Errorf("no choices returned from openai")
 	}
 
 	return &GenerationResponse{
-		MarkdownContent: cleanMarkdownOutput(chatResp.Choices[0].Message.Content),
+		MarkdownContent: content,
 		ModelUsed:       model,
-		TokensUsed:      chatResp.Usage.TotalTokens,
+		InputTokens:     inTok,
+		OutputTokens:    outTok,
+		TokensUsed:      tokens,
+	}, nil
+}
+
+func (p *OpenAIProvider) GenerateSystemMap(ctx context.Context, req SystemMapRequest) (*SystemMapResponse, error) {
+	model := req.Model
+	if model == "" {
+		model = p.defaultModel
+	}
+	systemPrompt := `You are DocForge System Mapper.
+Synthesize a concise, high-level architecture component map and data-flow overview based on the provided technical source chunks.
+Include a Mermaid flowchart (flowchart TD) of key components and data paths. Return ONLY clean Markdown.`
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Project: %s\nDescription: %s\n\n=== SOURCE CHUNKS ===\n", req.ProjectName, req.Description))
+	for _, c := range req.Chunks {
+		sb.WriteString(fmt.Sprintf("\n%s\n%s\n", c.SearchHeader, c.Content))
+	}
+
+	content, inTok, outTok, tokens, err := p.callChat(ctx, systemPrompt, sb.String(), model, req.Temperature, req.MaxTokens)
+	if err != nil {
+		return nil, err
+	}
+	return &SystemMapResponse{
+		Markdown:     content,
+		ModelUsed:    model,
+		InputTokens:  inTok,
+		OutputTokens: outTok,
+		TokensUsed:   tokens,
+	}, nil
+}
+
+func (p *OpenAIProvider) GenerateSection(ctx context.Context, req SectionGenerationRequest) (*SectionGenerationResponse, error) {
+	model := req.Model
+	if model == "" {
+		model = p.defaultModel
+	}
+	systemPrompt := `You are DocForge Section Generator.
+Synthesize the requested document section adhering strictly to the provided template and grounding chunks.
+GROUND TRUTH RULES:
+1. Use ONLY the provided sources. Cite originating file and line numbers inline as [filename#Lstart-Lend].
+2. Mark any inference or assumption as [INFERRED]. Mark any missing details as [MISSING].
+3. Do not invent endpoints, parameters, or behavior not present in the sources. Return ONLY clean Markdown.`
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Project: %s\nSection: %s\nSection Goal: %s\n\n", req.ProjectName, req.SectionTitle, req.SectionGoal))
+	if req.SystemMap != "" {
+		sb.WriteString("=== SYSTEM MAP SKELETON ===\n" + req.SystemMap + "\n\n")
+	}
+	if req.TemplatePart != "" {
+		sb.WriteString("=== SECTION TEMPLATE ===\n```markdown\n" + req.TemplatePart + "\n```\n\n")
+	}
+	sb.WriteString("=== GROUNDING SOURCE CHUNKS ===\n")
+	for _, c := range req.Chunks {
+		sb.WriteString(fmt.Sprintf("\n%s\n%s\n", c.SearchHeader, c.Content))
+	}
+
+	content, inTok, outTok, tokens, err := p.callChat(ctx, systemPrompt, sb.String(), model, req.Temperature, req.MaxTokens)
+	if err != nil {
+		return nil, err
+	}
+	return &SectionGenerationResponse{
+		Markdown:     content,
+		ModelUsed:    model,
+		InputTokens:  inTok,
+		OutputTokens: outTok,
+		TokensUsed:   tokens,
+	}, nil
+}
+
+func (p *OpenAIProvider) SelfCorrect(ctx context.Context, req SelfCorrectionRequest) (*SelfCorrectionResponse, error) {
+	model := req.Model
+	if model == "" {
+		model = p.defaultModel
+	}
+	systemPrompt := `You are DocForge Pre-Review Self-Correction.
+Revise the provided technical documentation to resolve the flagged pre-review issues.
+- Fix broken section links or inconsistent headings.
+- Enforce canonical glossary terminology (replace avoided terms).
+- Remove repetitive boilerplate phrasing or AI hedging language.
+Keep all technical facts and grounding citations intact. Return ONLY clean Markdown.`
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Project: %s\n\n=== CURRENT DRAFT ===\n```markdown\n%s\n```\n\n", req.ProjectName, req.CurrentMarkdown))
+	sb.WriteString("=== DETECTED PRE-REVIEW ISSUES TO CORRECT ===\n")
+	for i, issue := range req.Issues {
+		sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, issue))
+	}
+
+	content, inTok, outTok, tokens, err := p.callChat(ctx, systemPrompt, sb.String(), model, req.Temperature, req.MaxTokens)
+	if err != nil {
+		return nil, err
+	}
+	return &SelfCorrectionResponse{
+		UpdatedMarkdown: content,
+		ModelUsed:       model,
+		InputTokens:     inTok,
+		OutputTokens:    outTok,
+		TokensUsed:      tokens,
 	}, nil
 }
 
@@ -225,65 +407,20 @@ At the end of your response, provide a brief summary of changes in this format:
 <summary bullet points>`
 
 	userPrompt := buildFeedbackRevisionPrompt(req)
-
-	body := openAIChatRequest{
-		Model: model,
-		Messages: []openAIChatMessage{
-			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: userPrompt},
-		},
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
-	}
-	if body.MaxTokens == 0 {
-		body.MaxTokens = 4096
-	}
-
-	jsonBytes, err := json.Marshal(body)
+	raw, inTok, outTok, tokens, err := p.callChat(ctx, systemPrompt, userPrompt, model, req.Temperature, req.MaxTokens)
 	if err != nil {
 		return nil, err
 	}
 
-	url := fmt.Sprintf("%s/chat/completions", p.baseURL)
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBytes))
-	if err != nil {
-		return nil, err
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", p.apiKey))
-
-	resp, err := p.client.Do(httpReq)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	respBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	var chatResp openAIChatResponse
-	if err := json.Unmarshal(respBytes, &chatResp); err != nil {
-		return nil, err
-	}
-
-	if chatResp.Error != nil {
-		return nil, fmt.Errorf("api error: %s", chatResp.Error.Message)
-	}
-
-	if len(chatResp.Choices) == 0 {
-		return nil, fmt.Errorf("no output returned")
-	}
-
-	raw := chatResp.Choices[0].Message.Content
 	content, summary := parseChangeSummary(raw)
 
 	return &FeedbackRevisionResponse{
 		UpdatedMarkdown: cleanMarkdownOutput(content),
 		ChangeSummary:   summary,
 		ModelUsed:       model,
+		InputTokens:     inTok,
+		OutputTokens:    outTok,
+		TokensUsed:      tokens,
 	}, nil
 }
 
@@ -343,6 +480,70 @@ type anthropicResponse struct {
 	} `json:"error,omitempty"`
 }
 
+func (p *AnthropicProvider) callMessages(ctx context.Context, systemPrompt, userPrompt, model string, temperature float64, maxTokens int) (string, int, int, int, error) {
+	if model == "" {
+		model = p.defaultModel
+	}
+	if maxTokens == 0 {
+		maxTokens = 4096
+	}
+
+	body := anthropicRequest{
+		Model:       model,
+		System:      systemPrompt,
+		Messages:    []anthropicMessage{{Role: "user", Content: userPrompt}},
+		MaxTokens:   maxTokens,
+		Temperature: temperature,
+	}
+
+	jsonBytes, err := json.Marshal(body)
+	if err != nil {
+		return "", 0, 0, 0, err
+	}
+
+	url := fmt.Sprintf("%s/messages", p.baseURL)
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBytes))
+	if err != nil {
+		return "", 0, 0, 0, err
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("x-api-key", p.apiKey)
+	httpReq.Header.Set("anthropic-version", "2023-06-01")
+
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		return "", 0, 0, 0, err
+	}
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", 0, 0, 0, err
+	}
+
+	var aResp anthropicResponse
+	if err := json.Unmarshal(respBytes, &aResp); err != nil {
+		return "", 0, 0, 0, err
+	}
+
+	if aResp.Error != nil {
+		return "", 0, 0, 0, fmt.Errorf("anthropic error: %s", aResp.Error.Message)
+	}
+
+	var text string
+	for _, c := range aResp.Content {
+		if c.Type == "text" {
+			text += c.Text
+		}
+	}
+
+	inTok := aResp.Usage.InputTokens
+	outTok := aResp.Usage.OutputTokens
+	tokens := inTok + outTok
+	return cleanMarkdownOutput(text), inTok, outTok, tokens, nil
+}
+
 func (p *AnthropicProvider) Generate(ctx context.Context, req GenerationRequest) (*GenerationResponse, error) {
 	model := req.Model
 	if model == "" {
@@ -356,65 +557,116 @@ GROUND TRUTH RULES:
 2. Mark any reasonable inference as [INFERRED] and any missing information as [MISSING]. Do not invent undocumented behavior or false APIs.
 3. Adhere strictly to the requested Markdown template structure.`
 
-	maxTokens := req.MaxTokens
-	if maxTokens == 0 {
-		maxTokens = 4096
-	}
-
-	body := anthropicRequest{
-		Model:       model,
-		System:      systemPrompt,
-		Messages:    []anthropicMessage{{Role: "user", Content: buildGenerationUserPrompt(req)}},
-		MaxTokens:   maxTokens,
-		Temperature: req.Temperature,
-	}
-
-	jsonBytes, err := json.Marshal(body)
+	userPrompt := buildGenerationUserPrompt(req)
+	content, inTok, outTok, tokens, err := p.callMessages(ctx, systemPrompt, userPrompt, model, req.Temperature, req.MaxTokens)
 	if err != nil {
 		return nil, err
-	}
-
-	url := fmt.Sprintf("%s/messages", p.baseURL)
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBytes))
-	if err != nil {
-		return nil, err
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", p.apiKey)
-	httpReq.Header.Set("anthropic-version", "2023-06-01")
-
-	resp, err := p.client.Do(httpReq)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	respBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	var aResp anthropicResponse
-	if err := json.Unmarshal(respBytes, &aResp); err != nil {
-		return nil, err
-	}
-
-	if aResp.Error != nil {
-		return nil, fmt.Errorf("anthropic error: %s", aResp.Error.Message)
-	}
-
-	var text string
-	for _, c := range aResp.Content {
-		if c.Type == "text" {
-			text += c.Text
-		}
 	}
 
 	return &GenerationResponse{
-		MarkdownContent: cleanMarkdownOutput(text),
+		MarkdownContent: content,
 		ModelUsed:       model,
-		TokensUsed:      aResp.Usage.InputTokens + aResp.Usage.OutputTokens,
+		InputTokens:     inTok,
+		OutputTokens:    outTok,
+		TokensUsed:      tokens,
+	}, nil
+}
+
+func (p *AnthropicProvider) GenerateSystemMap(ctx context.Context, req SystemMapRequest) (*SystemMapResponse, error) {
+	model := req.Model
+	if model == "" {
+		model = p.defaultModel
+	}
+	systemPrompt := `You are DocForge System Mapper.
+Generate a concise, high-level architecture component map and data-flow overview based on the provided technical source chunks.
+Include a Mermaid flowchart (flowchart TD) of key components and data paths. Return ONLY clean Markdown.`
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Project: %s\nDescription: %s\n\n=== SOURCE CHUNKS ===\n", req.ProjectName, req.Description))
+	for _, c := range req.Chunks {
+		sb.WriteString(fmt.Sprintf("\n%s\n%s\n", c.SearchHeader, c.Content))
+	}
+
+	content, inTok, outTok, tokens, err := p.callMessages(ctx, systemPrompt, sb.String(), model, req.Temperature, req.MaxTokens)
+	if err != nil {
+		return nil, err
+	}
+	return &SystemMapResponse{
+		Markdown:     content,
+		ModelUsed:    model,
+		InputTokens:  inTok,
+		OutputTokens: outTok,
+		TokensUsed:   tokens,
+	}, nil
+}
+
+func (p *AnthropicProvider) GenerateSection(ctx context.Context, req SectionGenerationRequest) (*SectionGenerationResponse, error) {
+	model := req.Model
+	if model == "" {
+		model = p.defaultModel
+	}
+	systemPrompt := `You are DocForge Section Generator.
+Synthesize the requested document section adhering strictly to the provided template and grounding chunks.
+GROUND TRUTH RULES:
+1. Use ONLY the provided sources. Cite originating file and line numbers inline as [filename#Lstart-Lend].
+2. Mark any inference or assumption as [INFERRED]. Mark any missing details as [MISSING].
+3. Do not invent endpoints, parameters, or behavior not present in the sources. Return ONLY clean Markdown.`
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Project: %s\nSection: %s\nSection Goal: %s\n\n", req.ProjectName, req.SectionTitle, req.SectionGoal))
+	if req.SystemMap != "" {
+		sb.WriteString("=== SYSTEM MAP SKELETON ===\n" + req.SystemMap + "\n\n")
+	}
+	if req.TemplatePart != "" {
+		sb.WriteString("=== SECTION TEMPLATE ===\n```markdown\n" + req.TemplatePart + "\n```\n\n")
+	}
+	sb.WriteString("=== GROUNDING SOURCE CHUNKS ===\n")
+	for _, c := range req.Chunks {
+		sb.WriteString(fmt.Sprintf("\n%s\n%s\n", c.SearchHeader, c.Content))
+	}
+
+	content, inTok, outTok, tokens, err := p.callMessages(ctx, systemPrompt, sb.String(), model, req.Temperature, req.MaxTokens)
+	if err != nil {
+		return nil, err
+	}
+	return &SectionGenerationResponse{
+		Markdown:     content,
+		ModelUsed:    model,
+		InputTokens:  inTok,
+		OutputTokens: outTok,
+		TokensUsed:   tokens,
+	}, nil
+}
+
+func (p *AnthropicProvider) SelfCorrect(ctx context.Context, req SelfCorrectionRequest) (*SelfCorrectionResponse, error) {
+	model := req.Model
+	if model == "" {
+		model = p.defaultModel
+	}
+	systemPrompt := `You are DocForge Pre-Review Self-Correction.
+Revise the provided technical documentation to resolve the flagged pre-review issues.
+- Fix broken section links or inconsistent headings.
+- Enforce canonical glossary terminology (replace avoided terms).
+- Remove repetitive boilerplate phrasing or AI hedging language.
+Keep all technical facts and grounding citations intact. Return ONLY clean Markdown.`
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Project: %s\n\n=== CURRENT DRAFT ===\n```markdown\n%s\n```\n\n", req.ProjectName, req.CurrentMarkdown))
+	sb.WriteString("=== DETECTED PRE-REVIEW ISSUES TO CORRECT ===\n")
+	for i, issue := range req.Issues {
+		sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, issue))
+	}
+
+	content, inTok, outTok, tokens, err := p.callMessages(ctx, systemPrompt, sb.String(), model, req.Temperature, req.MaxTokens)
+	if err != nil {
+		return nil, err
+	}
+	return &SelfCorrectionResponse{
+		UpdatedMarkdown: content,
+		ModelUsed:       model,
+		InputTokens:     inTok,
+		OutputTokens:    outTok,
+		TokensUsed:      tokens,
 	}, nil
 }
 
@@ -432,59 +684,10 @@ At the end of your response, provide a brief summary of changes in this format:
 <!-- CHANGE_SUMMARY -->
 <summary bullet points>`
 
-	maxTokens := req.MaxTokens
-	if maxTokens == 0 {
-		maxTokens = 4096
-	}
-
-	body := anthropicRequest{
-		Model:       model,
-		System:      systemPrompt,
-		Messages:    []anthropicMessage{{Role: "user", Content: buildFeedbackRevisionPrompt(req)}},
-		MaxTokens:   maxTokens,
-		Temperature: req.Temperature,
-	}
-
-	jsonBytes, err := json.Marshal(body)
+	userPrompt := buildFeedbackRevisionPrompt(req)
+	text, inTok, outTok, tokens, err := p.callMessages(ctx, systemPrompt, userPrompt, model, req.Temperature, req.MaxTokens)
 	if err != nil {
 		return nil, err
-	}
-
-	url := fmt.Sprintf("%s/messages", p.baseURL)
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBytes))
-	if err != nil {
-		return nil, err
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", p.apiKey)
-	httpReq.Header.Set("anthropic-version", "2023-06-01")
-
-	resp, err := p.client.Do(httpReq)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	respBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	var aResp anthropicResponse
-	if err := json.Unmarshal(respBytes, &aResp); err != nil {
-		return nil, err
-	}
-
-	if aResp.Error != nil {
-		return nil, fmt.Errorf("anthropic error: %s", aResp.Error.Message)
-	}
-
-	var text string
-	for _, c := range aResp.Content {
-		if c.Type == "text" {
-			text += c.Text
-		}
 	}
 
 	content, summary := parseChangeSummary(text)
@@ -492,6 +695,9 @@ At the end of your response, provide a brief summary of changes in this format:
 		UpdatedMarkdown: cleanMarkdownOutput(content),
 		ChangeSummary:   summary,
 		ModelUsed:       model,
+		InputTokens:     inTok,
+		OutputTokens:    outTok,
+		TokensUsed:      tokens,
 	}, nil
 }
 
@@ -632,6 +838,8 @@ Operational procedures and troubleshooting guide for %s.
 	return &GenerationResponse{
 		MarkdownContent: content,
 		ModelUsed:       p.modelName,
+		InputTokens:     300,
+		OutputTokens:    150,
 		TokensUsed:      450,
 	}, nil
 }
@@ -654,6 +862,103 @@ func (p *MockProvider) ReviseWithFeedback(ctx context.Context, req FeedbackRevis
 		UpdatedMarkdown: updated,
 		ChangeSummary:   summaryText,
 		ModelUsed:       p.modelName,
+		InputTokens:     150,
+		OutputTokens:    100,
+		TokensUsed:      250,
+	}, nil
+}
+
+func (p *MockProvider) GenerateSystemMap(ctx context.Context, req SystemMapRequest) (*SystemMapResponse, error) {
+	md := fmt.Sprintf(`# System Architecture Map: %s
+
+## 1. High-Level Component Topology
+%s is structured into decoupled modules with pure-Go persistence.
+
+`+"```mermaid"+`
+flowchart TD
+    Client["Web UI / API Client"] --> Router["HTTP Router & Middleware"]
+    Router --> Service["Service Layer"]
+    Service --> Storage[("SQLite Persistence (WAL)")]
+    Service --> Worker["Async Job Worker Pipeline"]
+`+"```"+`
+
+## 2. Core Service Components
+- **API Router**: Handles REST request validation, JWT authentication, and route dispatching.
+- **Service Layer**: Orchestrates ingestion, chunk indexing, and structured documentation generation.
+- **Persistence Engine**: SQLite database in WAL mode with FTS5 lexical retrieval index.
+- **Worker Queue**: Background in-process queue processing asynchronous generation jobs.
+
+## 3. Data Flow Overview
+1. **Ingest**: Heterogeneous technical sources (code, markdown, spreadsheets, diagrams) are extracted, chunked, and indexed into FTS5.
+2. **Synthesize**: Multi-stage generation builds the System Map, retrieves targeted source chunks per section, and compiles draft documents.
+3. **Audit**: Automated pre-review checks enforce glossary terminology and verify code claims before human sign-off.
+`, req.ProjectName, req.ProjectName)
+
+	return &SystemMapResponse{
+		Markdown:     md,
+		ModelUsed:    p.modelName,
+		InputTokens:  220,
+		OutputTokens: 130,
+		TokensUsed:   350,
+	}, nil
+}
+
+func (p *MockProvider) GenerateSection(ctx context.Context, req SectionGenerationRequest) (*SectionGenerationResponse, error) {
+	var citations []string
+	for _, c := range req.Chunks {
+		if c.FilePath != "" {
+			citations = append(citations, fmt.Sprintf("- Grounded by `[%s#L%d-L%d]` (%s)", c.FilePath, c.LineStart, c.LineEnd, c.SymbolName))
+		}
+	}
+	citationBlock := strings.Join(citations, "\n")
+	if citationBlock == "" {
+		citationBlock = "- Synthesized from architectural baseline."
+	}
+
+	md := fmt.Sprintf(`### %s
+
+%s for %s based on retrieved ground truth technical chunks.
+
+#### Evidence Grounding
+%s
+
+#### Specifications
+- [x] Conforms to project architectural constraints.
+- [x] Verified against active symbol definitions.
+`, req.SectionTitle, req.SectionGoal, req.ProjectName, citationBlock)
+
+	return &SectionGenerationResponse{
+		Markdown:     md,
+		ModelUsed:    p.modelName,
+		InputTokens:  180,
+		OutputTokens: 100,
+		TokensUsed:   280,
+	}, nil
+}
+
+func (p *MockProvider) SelfCorrect(ctx context.Context, req SelfCorrectionRequest) (*SelfCorrectionResponse, error) {
+	corrected := req.CurrentMarkdown
+	// Replace common avoided words from CONTEXT.md
+	replacements := map[string]string{
+		" page ":    " Document ",
+		" pages ":   " Documents ",
+		" draft ":   " Document ",
+		" task ":    " Generation ",
+		" job ":     " Generation ",
+		" blocker ": " Blocking Feedback ",
+		" snippet ": " Source Chunk ",
+	}
+	for oldWord, newWord := range replacements {
+		corrected = strings.ReplaceAll(corrected, oldWord, newWord)
+		corrected = strings.ReplaceAll(corrected, strings.Title(oldWord), newWord)
+	}
+
+	return &SelfCorrectionResponse{
+		UpdatedMarkdown: corrected,
+		ModelUsed:       p.modelName,
+		InputTokens:     100,
+		OutputTokens:    50,
+		TokensUsed:      150,
 	}, nil
 }
 

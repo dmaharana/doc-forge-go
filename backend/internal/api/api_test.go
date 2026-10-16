@@ -383,3 +383,323 @@ func TestEndToEndHappyPath(t *testing.T) {
 		t.Fatalf("expected HTTP 403 Forbidden for non-member, got %d", w.Code)
 	}
 }
+
+func TestAdminUserPromotionAndDemotion(t *testing.T) {
+	router, cfg, _, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// 1. Login with seeded admin
+	loginBody, _ := json.Marshal(map[string]string{
+		"email":    cfg.AdminEmail,
+		"password": cfg.AdminPassword,
+	})
+	req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewReader(loginBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("admin login failed: %d", w.Code)
+	}
+	var loginResp LoginResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &loginResp)
+	adminAuthHeader := "Bearer " + loginResp.Token
+	adminUser := loginResp.User
+
+	// 2. Create a standard user
+	createUserBody, _ := json.Marshal(map[string]string{
+		"name":     "Bob Standard",
+		"email":    "bob@example.com",
+		"password": "Password123!",
+		"role":     "user",
+	})
+	req = httptest.NewRequest("POST", "/api/v1/admin/users", bytes.NewReader(createUserBody))
+	req.Header.Set("Authorization", adminAuthHeader)
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create user failed: %d, body: %s", w.Code, w.Body.String())
+	}
+	var bob models.User
+	_ = json.Unmarshal(w.Body.Bytes(), &bob)
+	if bob.Role != models.RoleUser {
+		t.Fatalf("expected role 'user', got '%s'", bob.Role)
+	}
+
+	// 3. Promote Bob to admin
+	promoteBody, _ := json.Marshal(map[string]string{
+		"role": "admin",
+	})
+	req = httptest.NewRequest("PUT", fmt.Sprintf("/api/v1/admin/users/%s", bob.ID), bytes.NewReader(promoteBody))
+	req.Header.Set("Authorization", adminAuthHeader)
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("promote user failed: %d, body: %s", w.Code, w.Body.String())
+	}
+	var updatedBob models.User
+	_ = json.Unmarshal(w.Body.Bytes(), &updatedBob)
+	if updatedBob.Role != models.RoleAdmin {
+		t.Fatalf("expected role 'admin', got '%s'", updatedBob.Role)
+	}
+
+	// 4. Demote Bob back to standard user
+	demoteBody, _ := json.Marshal(map[string]string{
+		"role": "user",
+	})
+	req = httptest.NewRequest("PUT", fmt.Sprintf("/api/v1/admin/users/%s", bob.ID), bytes.NewReader(demoteBody))
+	req.Header.Set("Authorization", adminAuthHeader)
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("demote user failed: %d, body: %s", w.Code, w.Body.String())
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &updatedBob)
+	if updatedBob.Role != models.RoleUser {
+		t.Fatalf("expected role 'user', got '%s'", updatedBob.Role)
+	}
+
+	// 5. Safeguard: Attempt to demote seeded admin when no other active admin exists
+	selfDemoteBody, _ := json.Marshal(map[string]string{
+		"role": "user",
+	})
+	req = httptest.NewRequest("PUT", fmt.Sprintf("/api/v1/admin/users/%s", adminUser.ID), bytes.NewReader(selfDemoteBody))
+	req.Header.Set("Authorization", adminAuthHeader)
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400 for self-demotion lockout, got %d", w.Code)
+	}
+
+	// 6. Safeguard: Attempt to deactivate seeded admin when no other active admin exists
+	selfDeactivateBody, _ := json.Marshal(map[string]bool{
+		"is_active": false,
+	})
+	req = httptest.NewRequest("PUT", fmt.Sprintf("/api/v1/admin/users/%s", adminUser.ID), bytes.NewReader(selfDeactivateBody))
+	req.Header.Set("Authorization", adminAuthHeader)
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400 for self-deactivation lockout, got %d", w.Code)
+	}
+
+	// 7. Invalid role rejection
+	invalidRoleBody, _ := json.Marshal(map[string]string{
+		"role": "superadmin",
+	})
+	req = httptest.NewRequest("PUT", fmt.Sprintf("/api/v1/admin/users/%s", bob.ID), bytes.NewReader(invalidRoleBody))
+	req.Header.Set("Authorization", adminAuthHeader)
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400 for invalid role, got %d", w.Code)
+	}
+}
+
+func TestProjectTokenUsageEndpoint(t *testing.T) {
+	router, cfg, repo, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// 1. Login with seeded admin
+	loginBody, _ := json.Marshal(map[string]string{
+		"email":    cfg.AdminEmail,
+		"password": cfg.AdminPassword,
+	})
+	req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewReader(loginBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login failed: %d", w.Code)
+	}
+	var loginResp LoginResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &loginResp)
+	authHeader := "Bearer " + loginResp.Token
+
+	// 2. Create project
+	projBody, _ := json.Marshal(map[string]string{
+		"name":        "Chargeback Billing Project",
+		"description": "Enterprise API for telemetry and analytics",
+	})
+	req = httptest.NewRequest("POST", "/api/v1/projects", bytes.NewReader(projBody))
+	req.Header.Set("Authorization", authHeader)
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create project failed: %d", w.Code)
+	}
+	var project models.Project
+	_ = json.Unmarshal(w.Body.Bytes(), &project)
+
+	// 3. Initial token usage must be 0
+	req = httptest.NewRequest("GET", fmt.Sprintf("/api/v1/projects/%s/token-usage", project.ID), nil)
+	req.Header.Set("Authorization", authHeader)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("get initial token usage failed: %d", w.Code)
+	}
+	var initialSummary models.ProjectTokenSummary
+	_ = json.Unmarshal(w.Body.Bytes(), &initialSummary)
+	if initialSummary.TotalTokens != 0 {
+		t.Fatalf("expected 0 initial tokens, got %d", initialSummary.TotalTokens)
+	}
+
+	// 4. Create a source with content so generation has material
+	source := &models.Source{
+		ProjectID:     project.ID,
+		Name:          "telemetry.go",
+		Type:          models.SourceTypeUpload,
+		MimeType:      "text/plain",
+		ExtractedText: "package telemetry\nfunc TrackEvent(name string) bool { return true }",
+		Status:        "ready",
+	}
+	_ = repo.CreateSource(source)
+
+	// 5. Submit generation
+	genBody, _ := json.Marshal(map[string]any{
+		"template_set": "product_spec",
+		"source_ids":   []string{source.ID},
+	})
+	req = httptest.NewRequest("POST", fmt.Sprintf("/api/v1/projects/%s/generations", project.ID), bytes.NewReader(genBody))
+	req.Header.Set("Authorization", authHeader)
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("submit generation failed: %d", w.Code)
+	}
+	var gen models.Generation
+	_ = json.Unmarshal(w.Body.Bytes(), &gen)
+
+	// Wait for generation completion
+	timeout := time.After(5 * time.Second)
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	var completedGen *models.Generation
+	for {
+		select {
+		case <-timeout:
+			t.Fatalf("generation timed out waiting for worker")
+		case <-ticker.C:
+			g, err := repo.GetGenerationByID(gen.ID)
+			if err == nil && (g.Status == models.GenerationCompleted || g.Status == models.GenerationFailed) {
+				completedGen = g
+				break
+			}
+		}
+		if completedGen != nil {
+			break
+		}
+	}
+	if completedGen.Status != models.GenerationCompleted {
+		t.Fatalf("generation failed: %s", completedGen.ErrorMessage)
+	}
+
+	// 6. Query token usage after generation
+	req = httptest.NewRequest("GET", fmt.Sprintf("/api/v1/projects/%s/token-usage", project.ID), nil)
+	req.Header.Set("Authorization", authHeader)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("get token usage after gen failed: %d", w.Code)
+	}
+	var afterGenSummary models.ProjectTokenSummary
+	_ = json.Unmarshal(w.Body.Bytes(), &afterGenSummary)
+
+	if afterGenSummary.TotalTokens <= 0 {
+		t.Fatalf("expected TotalTokens > 0, got %d", afterGenSummary.TotalTokens)
+	}
+	if afterGenSummary.TotalInputTokens <= 0 || afterGenSummary.TotalOutputTokens <= 0 {
+		t.Fatalf("expected positive input (%d) and output (%d) tokens", afterGenSummary.TotalInputTokens, afterGenSummary.TotalOutputTokens)
+	}
+	if afterGenSummary.ByOperation["system_mapping"] <= 0 {
+		t.Fatalf("expected tokens recorded for system_mapping, got %d", afterGenSummary.ByOperation["system_mapping"])
+	}
+	if afterGenSummary.ByOperation["section_population"] <= 0 {
+		t.Fatalf("expected tokens recorded for section_population, got %d", afterGenSummary.ByOperation["section_population"])
+	}
+
+	// 7. Verify project details endpoint returns total_tokens
+	req = httptest.NewRequest("GET", fmt.Sprintf("/api/v1/projects/%s", project.ID), nil)
+	req.Header.Set("Authorization", authHeader)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("get project failed: %d", w.Code)
+	}
+	var fetchedProj models.Project
+	_ = json.Unmarshal(w.Body.Bytes(), &fetchedProj)
+	if fetchedProj.TotalTokens != afterGenSummary.TotalTokens {
+		t.Fatalf("expected project TotalTokens %d, got %d", afterGenSummary.TotalTokens, fetchedProj.TotalTokens)
+	}
+
+	// 8. Add feedback and test revision token consumption
+	docs, err := repo.ListDocumentsByProject(project.ID)
+	if err != nil || len(docs) == 0 {
+		t.Fatalf("expected at least 1 document synthesized, got %d", len(docs))
+	}
+	doc := docs[0]
+
+	fbBody, _ := json.Marshal(map[string]any{
+		"category":    "clarification",
+		"content":     "Include latency SLA metrics for enterprise clients.",
+		"is_blocking": false,
+	})
+	req = httptest.NewRequest("POST", fmt.Sprintf("/api/v1/documents/%s/feedback", doc.ID), bytes.NewReader(fbBody))
+	req.Header.Set("Authorization", authHeader)
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("add feedback failed: %d", w.Code)
+	}
+
+	// Update with feedback
+	req = httptest.NewRequest("POST", fmt.Sprintf("/api/v1/documents/%s/update-with-feedback", doc.ID), nil)
+	req.Header.Set("Authorization", authHeader)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("update with feedback failed: %d, body: %s", w.Code, w.Body.String())
+	}
+
+	// 9. Verify tokens increased with feedback_revision
+	req = httptest.NewRequest("GET", fmt.Sprintf("/api/v1/projects/%s/token-usage", project.ID), nil)
+	req.Header.Set("Authorization", authHeader)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	var finalSummary models.ProjectTokenSummary
+	_ = json.Unmarshal(w.Body.Bytes(), &finalSummary)
+
+	if finalSummary.TotalTokens <= afterGenSummary.TotalTokens {
+		t.Fatalf("expected TotalTokens to increase after feedback revision (was %d, now %d)", afterGenSummary.TotalTokens, finalSummary.TotalTokens)
+	}
+	if finalSummary.ByOperation["feedback_revision"] <= 0 {
+		t.Fatalf("expected tokens recorded for feedback_revision, got %d", finalSummary.ByOperation["feedback_revision"])
+	}
+
+	// 10. Access control check: Uninvited user gets HTTP 403 Forbidden
+	req = httptest.NewRequest("GET", "/api/v1/auth/atlassian/callback?code="+url.QueryEscape("mock_atlassian_code:billing_auditor@example.com:Auditor"), nil)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	var auditorLogin LoginResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &auditorLogin)
+	auditorAuthHeader := "Bearer " + auditorLogin.Token
+
+	req = httptest.NewRequest("GET", fmt.Sprintf("/api/v1/projects/%s/token-usage", project.ID), nil)
+	req.Header.Set("Authorization", auditorAuthHeader)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected HTTP 403 Forbidden for non-member, got %d", w.Code)
+	}
+}
+
+

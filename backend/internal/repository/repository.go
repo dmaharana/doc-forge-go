@@ -183,8 +183,8 @@ func (r *Repository) CreateProject(p *models.Project) error {
 	}
 	defer tx.Rollback()
 
-	query := `INSERT INTO projects (id, name, description, owner_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
-	if _, err := tx.Exec(query, p.ID, p.Name, p.Description, p.OwnerID, p.Status, p.CreatedAt, p.UpdatedAt); err != nil {
+	query := `INSERT INTO projects (id, name, description, owner_id, status, llm_config_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	if _, err := tx.Exec(query, p.ID, p.Name, p.Description, p.OwnerID, p.Status, p.LLMConfigID, p.CreatedAt, p.UpdatedAt); err != nil {
 		return err
 	}
 
@@ -205,21 +205,28 @@ func (r *Repository) CreateProject(p *models.Project) error {
 
 func (r *Repository) GetProjectByID(id string) (*models.Project, error) {
 	query := `
-		SELECT p.id, p.name, p.description, p.owner_id, u.name, p.status, p.created_at, p.updated_at
+		SELECT p.id, p.name, p.description, p.owner_id, u.name, p.status, p.llm_config_id, COALESCE(lc.provider, ''), COALESCE(lc.default_model, ''),
+		       COALESCE((SELECT SUM(total_tokens) FROM project_token_usage WHERE project_id = p.id), 0) as total_tokens,
+		       p.created_at, p.updated_at
 		FROM projects p
 		JOIN users u ON p.owner_id = u.id
+		LEFT JOIN llm_configs lc ON p.llm_config_id = lc.id
 		WHERE p.id = ?
 	`
 	row := r.db.QueryRow(query, id)
 
 	var p models.Project
 	var desc sql.NullString
-	err := row.Scan(&p.ID, &p.Name, &desc, &p.OwnerID, &p.OwnerName, &p.Status, &p.CreatedAt, &p.UpdatedAt)
+	var llmCfgID sql.NullString
+	err := row.Scan(&p.ID, &p.Name, &desc, &p.OwnerID, &p.OwnerName, &p.Status, &llmCfgID, &p.LLMProvider, &p.LLMModel, &p.TotalTokens, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
 	if desc.Valid {
 		p.Description = desc.String
+	}
+	if llmCfgID.Valid {
+		p.LLMConfigID = &llmCfgID.String
 	}
 	return &p, nil
 }
@@ -229,18 +236,24 @@ func (r *Repository) ListProjects(userID string, isAdmin bool) ([]models.Project
 	var args []any
 	if isAdmin {
 		query = `
-			SELECT p.id, p.name, p.description, p.owner_id, u.name, p.status, COALESCE(pm.role, 'admin') as user_role, p.created_at, p.updated_at
+			SELECT p.id, p.name, p.description, p.owner_id, u.name, p.status, p.llm_config_id, COALESCE(lc.provider, ''), COALESCE(lc.default_model, ''), COALESCE(pm.role, 'admin') as user_role,
+			       COALESCE((SELECT SUM(total_tokens) FROM project_token_usage WHERE project_id = p.id), 0) as total_tokens,
+			       p.created_at, p.updated_at
 			FROM projects p
 			JOIN users u ON p.owner_id = u.id
+			LEFT JOIN llm_configs lc ON p.llm_config_id = lc.id
 			LEFT JOIN project_members pm ON p.id = pm.project_id AND pm.user_id = ? AND pm.status = 'active'
 			ORDER BY p.updated_at DESC
 		`
 		args = append(args, userID)
 	} else {
 		query = `
-			SELECT p.id, p.name, p.description, p.owner_id, u.name, p.status, pm.role as user_role, p.created_at, p.updated_at
+			SELECT p.id, p.name, p.description, p.owner_id, u.name, p.status, p.llm_config_id, COALESCE(lc.provider, ''), COALESCE(lc.default_model, ''), pm.role as user_role,
+			       COALESCE((SELECT SUM(total_tokens) FROM project_token_usage WHERE project_id = p.id), 0) as total_tokens,
+			       p.created_at, p.updated_at
 			FROM projects p
 			JOIN users u ON p.owner_id = u.id
+			LEFT JOIN llm_configs lc ON p.llm_config_id = lc.id
 			JOIN project_members pm ON p.id = pm.project_id AND pm.user_id = ? AND pm.status = 'active'
 			ORDER BY p.updated_at DESC
 		`
@@ -257,12 +270,16 @@ func (r *Repository) ListProjects(userID string, isAdmin bool) ([]models.Project
 	for rows.Next() {
 		var p models.Project
 		var desc sql.NullString
+		var llmCfgID sql.NullString
 		var userRole sql.NullString
-		if err := rows.Scan(&p.ID, &p.Name, &desc, &p.OwnerID, &p.OwnerName, &p.Status, &userRole, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &desc, &p.OwnerID, &p.OwnerName, &p.Status, &llmCfgID, &p.LLMProvider, &p.LLMModel, &userRole, &p.TotalTokens, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if desc.Valid {
 			p.Description = desc.String
+		}
+		if llmCfgID.Valid {
+			p.LLMConfigID = &llmCfgID.String
 		}
 		if userRole.Valid {
 			p.UserRole = userRole.String
@@ -272,9 +289,9 @@ func (r *Repository) ListProjects(userID string, isAdmin bool) ([]models.Project
 	return list, rows.Err()
 }
 
-func (r *Repository) UpdateProject(id, name, description, status string) error {
-	query := `UPDATE projects SET name = ?, description = ?, status = ?, updated_at = ? WHERE id = ?`
-	_, err := r.db.Exec(query, name, description, status, time.Now().UTC(), id)
+func (r *Repository) UpdateProject(id, name, description, status string, llmConfigID *string) error {
+	query := `UPDATE projects SET name = ?, description = ?, status = ?, llm_config_id = ?, updated_at = ? WHERE id = ?`
+	_, err := r.db.Exec(query, name, description, status, llmConfigID, time.Now().UTC(), id)
 	return err
 }
 
@@ -426,7 +443,9 @@ func (r *Repository) CreateGeneration(g *models.Generation, sourceIDs []string) 
 
 func (r *Repository) GetGenerationByID(id string) (*models.Generation, error) {
 	query := `
-		SELECT g.id, g.project_id, g.requested_by, u.name, g.status, g.template_set, g.llm_config_id, g.model_used, g.error_message, g.notification_sent_at, g.created_at, g.started_at, g.completed_at
+		SELECT g.id, g.project_id, g.requested_by, u.name, g.status, g.template_set, g.llm_config_id, g.model_used, g.error_message, g.notification_sent_at, g.system_map_md, g.completeness_scorecard_json,
+		       COALESCE((SELECT SUM(total_tokens) FROM project_token_usage WHERE generation_id = g.id), 0) as total_tokens,
+		       g.created_at, g.started_at, g.completed_at
 		FROM generations g
 		JOIN users u ON g.requested_by = u.id
 		WHERE g.id = ?
@@ -434,9 +453,9 @@ func (r *Repository) GetGenerationByID(id string) (*models.Generation, error) {
 	row := r.db.QueryRow(query, id)
 
 	var g models.Generation
-	var llmCfg, model, errMsg sql.NullString
+	var llmCfg, model, errMsg, sysMap, scorecard sql.NullString
 	var notifSent, started, completed sql.NullTime
-	err := row.Scan(&g.ID, &g.ProjectID, &g.RequestedBy, &g.RequesterName, &g.Status, &g.TemplateSet, &llmCfg, &model, &errMsg, &notifSent, &g.CreatedAt, &started, &completed)
+	err := row.Scan(&g.ID, &g.ProjectID, &g.RequestedBy, &g.RequesterName, &g.Status, &g.TemplateSet, &llmCfg, &model, &errMsg, &notifSent, &sysMap, &scorecard, &g.TotalTokens, &g.CreatedAt, &started, &completed)
 	if err != nil {
 		return nil, err
 	}
@@ -451,6 +470,12 @@ func (r *Repository) GetGenerationByID(id string) (*models.Generation, error) {
 	}
 	if notifSent.Valid {
 		g.NotificationSentAt = &notifSent.Time
+	}
+	if sysMap.Valid {
+		g.SystemMapMD = &sysMap.String
+	}
+	if scorecard.Valid {
+		g.CompletenessScorecardJSON = &scorecard.String
 	}
 	if started.Valid {
 		g.StartedAt = &started.Time
@@ -471,12 +496,17 @@ func (r *Repository) GetGenerationByID(id string) (*models.Generation, error) {
 		}
 	}
 
+	stages, _ := r.ListGenerationStages(g.ID)
+	g.Stages = stages
+
 	return &g, nil
 }
 
 func (r *Repository) ListGenerationsByProject(projectID string) ([]models.Generation, error) {
 	query := `
-		SELECT g.id, g.project_id, g.requested_by, u.name, g.status, g.template_set, g.llm_config_id, g.model_used, g.error_message, g.notification_sent_at, g.created_at, g.started_at, g.completed_at
+		SELECT g.id, g.project_id, g.requested_by, u.name, g.status, g.template_set, g.llm_config_id, g.model_used, g.error_message, g.notification_sent_at,
+		       COALESCE((SELECT SUM(total_tokens) FROM project_token_usage WHERE generation_id = g.id), 0) as total_tokens,
+		       g.created_at, g.started_at, g.completed_at
 		FROM generations g
 		JOIN users u ON g.requested_by = u.id
 		WHERE g.project_id = ?
@@ -493,7 +523,7 @@ func (r *Repository) ListGenerationsByProject(projectID string) ([]models.Genera
 		var g models.Generation
 		var llmCfg, model, errMsg sql.NullString
 		var notifSent, started, completed sql.NullTime
-		if err := rows.Scan(&g.ID, &g.ProjectID, &g.RequestedBy, &g.RequesterName, &g.Status, &g.TemplateSet, &llmCfg, &model, &errMsg, &notifSent, &g.CreatedAt, &started, &completed); err != nil {
+		if err := rows.Scan(&g.ID, &g.ProjectID, &g.RequestedBy, &g.RequesterName, &g.Status, &g.TemplateSet, &llmCfg, &model, &errMsg, &notifSent, &g.TotalTokens, &g.CreatedAt, &started, &completed); err != nil {
 			return nil, err
 		}
 		if llmCfg.Valid {
@@ -822,6 +852,14 @@ func (r *Repository) MarkOpenFeedbackAddressed(documentID string) error {
 	query := `UPDATE document_feedback SET status = 'addressed', updated_at = ? WHERE document_id = ? AND status = 'open'`
 	_, err := r.db.Exec(query, time.Now().UTC(), documentID)
 	return err
+}
+
+func (r *Repository) ListDocumentFeedback(documentID string) ([]models.DocumentFeedback, error) {
+	doc, err := r.GetDocumentByID(documentID)
+	if err != nil {
+		return nil, err
+	}
+	return doc.Feedback, nil
 }
 
 // ----------------- ATLASSIAN -----------------

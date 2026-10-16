@@ -107,20 +107,81 @@ func (h *Handlers) AdminCreateUser(w http.ResponseWriter, r *http.Request) {
 }
 
 type UpdateUserRequest struct {
-	Name     string `json:"name"`
-	Role     string `json:"role"`
-	IsActive bool   `json:"is_active"`
+	Name     *string `json:"name,omitempty"`
+	Role     *string `json:"role,omitempty"`
+	IsActive *bool   `json:"is_active,omitempty"`
 }
 
 func (h *Handlers) AdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	currentUser := GetCurrentUser(r)
+
 	var req UpdateUserRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
 		return
 	}
 
-	if err := h.repo.UpdateUser(id, req.Name, req.Role, req.IsActive); err != nil {
+	targetUser, err := h.repo.GetUserByID(id)
+	if err != nil || targetUser == nil {
+		respondJSON(w, http.StatusNotFound, map[string]string{"error": "user not found"})
+		return
+	}
+
+	name := targetUser.Name
+	if req.Name != nil && *req.Name != "" {
+		name = *req.Name
+	}
+
+	role := string(targetUser.Role)
+	if req.Role != nil && *req.Role != "" {
+		newRole := *req.Role
+		if newRole != string(models.RoleAdmin) && newRole != string(models.RoleUser) {
+			respondJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid role: must be 'admin' or 'user'"})
+			return
+		}
+
+		// Prevent last remaining active admin from demoting themselves to user
+		if targetUser.ID == currentUser.ID && newRole == string(models.RoleUser) {
+			allUsers, err := h.repo.ListUsers()
+			if err == nil {
+				otherAdmins := 0
+				for _, u := range allUsers {
+					if u.ID != currentUser.ID && u.Role == models.RoleAdmin && u.IsActive {
+						otherAdmins++
+					}
+				}
+				if otherAdmins == 0 {
+					respondJSON(w, http.StatusBadRequest, map[string]string{"error": "cannot demote the only remaining active administrator"})
+					return
+				}
+			}
+		}
+		role = newRole
+	}
+
+	isActive := targetUser.IsActive
+	if req.IsActive != nil {
+		// Prevent last remaining active admin from deactivating themselves
+		if targetUser.ID == currentUser.ID && !*req.IsActive {
+			allUsers, err := h.repo.ListUsers()
+			if err == nil {
+				otherAdmins := 0
+				for _, u := range allUsers {
+					if u.ID != currentUser.ID && u.Role == models.RoleAdmin && u.IsActive {
+						otherAdmins++
+					}
+				}
+				if otherAdmins == 0 {
+					respondJSON(w, http.StatusBadRequest, map[string]string{"error": "cannot deactivate the only remaining active administrator"})
+					return
+				}
+			}
+		}
+		isActive = *req.IsActive
+	}
+
+	if err := h.repo.UpdateUser(id, name, role, isActive); err != nil {
 		respondJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -136,6 +197,21 @@ func (h *Handlers) AdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 // ----------------- ADMIN LLM CONFIGS -----------------
 
 func (h *Handlers) AdminListLLMConfigs(w http.ResponseWriter, r *http.Request) {
+	configs, err := h.repo.ListLLMConfigs()
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	for i := range configs {
+		if configs[i].APIKeyEncrypted != "" {
+			configs[i].APIKeyMasked = "••••••••••••"
+		}
+	}
+	respondJSON(w, http.StatusOK, configs)
+}
+
+func (h *Handlers) ListAvailableLLMConfigs(w http.ResponseWriter, r *http.Request) {
 	configs, err := h.repo.ListLLMConfigs()
 	if err != nil {
 		respondJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -226,8 +302,9 @@ func (h *Handlers) ListProjects(w http.ResponseWriter, r *http.Request) {
 }
 
 type CreateProjectRequest struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
+	Name        string  `json:"name"`
+	Description string  `json:"description"`
+	LLMConfigID *string `json:"llm_config_id,omitempty"`
 }
 
 func (h *Handlers) CreateProject(w http.ResponseWriter, r *http.Request) {
@@ -243,17 +320,28 @@ func (h *Handlers) CreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var llmCfgID *string
+	if req.LLMConfigID != nil && *req.LLMConfigID != "" && *req.LLMConfigID != "default" {
+		llmCfgID = req.LLMConfigID
+	}
+
 	p := &models.Project{
 		Name:        req.Name,
 		Description: req.Description,
 		OwnerID:     user.ID,
 		OwnerName:   user.Name,
 		Status:      "active",
+		LLMConfigID: llmCfgID,
 	}
 
 	if err := h.repo.CreateProject(p); err != nil {
 		respondJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+
+	// Re-fetch created project to populate associated LLM metadata if set
+	if created, err := h.repo.GetProjectByID(p.ID); err == nil && created != nil {
+		p = created
 	}
 
 	respondJSON(w, http.StatusCreated, p)
@@ -293,22 +381,60 @@ func (h *Handlers) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	p, err := h.repo.GetProjectByID(id)
+	if err != nil || p == nil {
+		respondJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+		return
+	}
+
 	var req struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		Status      string `json:"status"`
+		Name        *string `json:"name"`
+		Description *string `json:"description"`
+		Status      *string `json:"status"`
+		LLMConfigID *string `json:"llm_config_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
 		return
 	}
 
-	if err := h.repo.UpdateProject(id, req.Name, req.Description, req.Status); err != nil {
+	name := p.Name
+	if req.Name != nil && *req.Name != "" {
+		name = *req.Name
+	}
+	desc := p.Description
+	if req.Description != nil {
+		desc = *req.Description
+	}
+	status := p.Status
+	if req.Status != nil && *req.Status != "" {
+		status = *req.Status
+	}
+
+	llmConfigID := p.LLMConfigID
+	if req.LLMConfigID != nil {
+		if *req.LLMConfigID == "" || *req.LLMConfigID == "default" {
+			llmConfigID = nil
+		} else {
+			llmConfigID = req.LLMConfigID
+		}
+	}
+
+	if err := h.repo.UpdateProject(id, name, desc, status, llmConfigID); err != nil {
 		respondJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
-	p, _ := h.repo.GetProjectByID(id)
+	updatedProject, _ := h.repo.GetProjectByID(id)
+	if updatedProject != nil {
+		updatedProject.UserRole = string(role)
+		respondJSON(w, http.StatusOK, updatedProject)
+		return
+	}
+	p.Name = name
+	p.Description = desc
+	p.Status = status
+	p.LLMConfigID = llmConfigID
 	p.UserRole = string(role)
 	respondJSON(w, http.StatusOK, p)
 }
@@ -483,6 +609,14 @@ func (h *Handlers) UploadSourceFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if extractRes != nil && len(extractRes.Chunks) > 0 {
+		for i := range extractRes.Chunks {
+			extractRes.Chunks[i].SourceID = source.ID
+			extractRes.Chunks[i].ProjectID = projectID
+		}
+		_ = h.repo.SaveSourceChunks(extractRes.Chunks)
+	}
+
 	respondJSON(w, http.StatusCreated, source)
 }
 
@@ -538,6 +672,14 @@ func (h *Handlers) AddRemoteSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if extractRes != nil && len(extractRes.Chunks) > 0 {
+		for i := range extractRes.Chunks {
+			extractRes.Chunks[i].SourceID = source.ID
+			extractRes.Chunks[i].ProjectID = projectID
+		}
+		_ = h.repo.SaveSourceChunks(extractRes.Chunks)
+	}
+
 	respondJSON(w, http.StatusCreated, source)
 }
 
@@ -582,11 +724,20 @@ func (h *Handlers) SubmitGeneration(w http.ResponseWriter, r *http.Request) {
 		req.TemplateSet = "product_spec,adr,release_notes,runbook"
 	}
 
+	llmConfigID := req.LLMConfigID
+	if llmConfigID == nil || *llmConfigID == "" || *llmConfigID == "default" {
+		if p, err := h.repo.GetProjectByID(projectID); err == nil && p != nil && p.LLMConfigID != nil {
+			llmConfigID = p.LLMConfigID
+		} else {
+			llmConfigID = nil
+		}
+	}
+
 	gen := &models.Generation{
 		ProjectID:   projectID,
 		RequestedBy: user.ID,
 		TemplateSet: req.TemplateSet,
-		LLMConfigID: req.LLMConfigID,
+		LLMConfigID: llmConfigID,
 	}
 
 	if err := h.repo.CreateGeneration(gen, req.SourceIDs); err != nil {
@@ -1128,4 +1279,44 @@ func (h *Handlers) SaveNotificationPreference(w http.ResponseWriter, r *http.Req
 
 	pref.TeamsWebhookMasked = "https://outlook.office.com/webhook/••••••••••••"
 	respondJSON(w, http.StatusOK, pref)
+}
+
+func (h *Handlers) GetProjectCompleteness(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "id")
+	compSvc := service.NewCompletenessService(h.repo)
+	scorecard, err := compSvc.EvaluateProject(r.Context(), projectID)
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	respondJSON(w, http.StatusOK, scorecard)
+}
+
+func (h *Handlers) GetGenerationStages(w http.ResponseWriter, r *http.Request) {
+	generationID := chi.URLParam(r, "id")
+	stages, err := h.repo.ListGenerationStages(generationID)
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	respondJSON(w, http.StatusOK, stages)
+}
+
+func (h *Handlers) GetProjectTokenUsage(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "id")
+	user := GetCurrentUser(r)
+
+	// Access control: must be member or admin
+	isMember, _, _ := h.repo.IsProjectMemberOrOwner(projectID, user.ID)
+	if user.Role != models.RoleAdmin && !isMember {
+		respondJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: you are not a member of this project"})
+		return
+	}
+
+	summary, err := h.repo.GetProjectTokenSummary(projectID)
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	respondJSON(w, http.StatusOK, summary)
 }

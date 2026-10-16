@@ -64,6 +64,9 @@ func NewRouter(cfg *config.Config, repo *repository.Repository, handlers *Handle
 		r.Group(func(r chi.Router) {
 			r.Use(AuthMiddleware(cfg, repo))
 
+			// LLM Configs (Available for project association and selection)
+			r.Get("/llm/configs", handlers.ListAvailableLLMConfigs)
+
 			// Admin Group
 			r.Route("/admin", func(r chi.Router) {
 				r.Use(RequireAdmin)
@@ -100,6 +103,12 @@ func NewRouter(cfg *config.Config, repo *repository.Repository, handlers *Handle
 				// Project Documents
 				r.Get("/{id}/documents", handlers.ListDocuments)
 
+				// Completeness Pre-Flight Scorecard
+				r.Get("/{id}/completeness", handlers.GetProjectCompleteness)
+
+				// Token Usage for Chargeback
+				r.Get("/{id}/token-usage", handlers.GetProjectTokenUsage)
+
 				// Confluence Target & Hierarchy for Project
 				r.Get("/{id}/confluence-target", handlers.GetProjectConfluenceTarget)
 				r.Post("/{id}/confluence-target", handlers.SetProjectConfluenceTarget)
@@ -111,8 +120,9 @@ func NewRouter(cfg *config.Config, repo *repository.Repository, handlers *Handle
 			// Sources direct delete
 			r.Delete("/sources/{id}", handlers.DeleteSource)
 
-			// Generations direct query
+			// Generations direct query & stages
 			r.Get("/generations/{id}", handlers.GetGeneration)
+			r.Get("/generations/{id}/stages", handlers.GetGenerationStages)
 
 			// Documents
 			r.Route("/documents", func(r chi.Router) {

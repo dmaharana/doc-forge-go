@@ -84,6 +84,7 @@ func (db *DB) runMigrations() error {
 		description TEXT,
 		owner_id TEXT NOT NULL REFERENCES users(id),
 		status TEXT NOT NULL DEFAULT 'active',
+		llm_config_id TEXT REFERENCES llm_configs(id),
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL
 	);
@@ -233,6 +234,102 @@ func (db *DB) runMigrations() error {
 	_ = db.addColumnIfNotExists("confluence_targets", "parent_page_title", "TEXT")
 	_ = db.addColumnIfNotExists("confluence_targets", "updated_by", "TEXT")
 	_ = db.addColumnIfNotExists("confluence_targets", "updated_at", "DATETIME")
+
+	// Migration 003: Chunking, FTS5 Virtual Table, Generation Stages
+	chunkingSchema := `
+	CREATE TABLE IF NOT EXISTS source_chunks (
+		id TEXT PRIMARY KEY,
+		source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+		project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+		chunk_index INTEGER NOT NULL,
+		file_path TEXT,
+		symbol_name TEXT,
+		chunk_type TEXT NOT NULL,
+		line_start INTEGER DEFAULT 0,
+		line_end INTEGER DEFAULT 0,
+		search_header TEXT,
+		content TEXT NOT NULL,
+		created_at DATETIME NOT NULL
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_source_chunks_source ON source_chunks(source_id);
+	CREATE INDEX IF NOT EXISTS idx_source_chunks_project ON source_chunks(project_id);
+	CREATE INDEX IF NOT EXISTS idx_source_chunks_type ON source_chunks(chunk_type);
+
+	CREATE VIRTUAL TABLE IF NOT EXISTS source_chunks_fts USING fts5(
+		chunk_id UNINDEXED,
+		project_id UNINDEXED,
+		source_id UNINDEXED,
+		file_path,
+		symbol_name,
+		chunk_type,
+		search_header,
+		content,
+		tokenize='porter unicode61'
+	);
+
+	CREATE TRIGGER IF NOT EXISTS trg_source_chunks_insert AFTER INSERT ON source_chunks BEGIN
+		INSERT INTO source_chunks_fts(chunk_id, project_id, source_id, file_path, symbol_name, chunk_type, search_header, content)
+		VALUES (new.id, new.project_id, new.source_id, COALESCE(new.file_path, ''), COALESCE(new.symbol_name, ''), new.chunk_type, COALESCE(new.search_header, ''), new.content);
+	END;
+
+	CREATE TRIGGER IF NOT EXISTS trg_source_chunks_delete AFTER DELETE ON source_chunks BEGIN
+		DELETE FROM source_chunks_fts WHERE chunk_id = old.id;
+	END;
+
+	CREATE TRIGGER IF NOT EXISTS trg_source_chunks_update AFTER UPDATE ON source_chunks BEGIN
+		DELETE FROM source_chunks_fts WHERE chunk_id = old.id;
+		INSERT INTO source_chunks_fts(chunk_id, project_id, source_id, file_path, symbol_name, chunk_type, search_header, content)
+		VALUES (new.id, new.project_id, new.source_id, COALESCE(new.file_path, ''), COALESCE(new.symbol_name, ''), new.chunk_type, COALESCE(new.search_header, ''), new.content);
+	END;
+
+	CREATE TABLE IF NOT EXISTS generation_stages (
+		id TEXT PRIMARY KEY,
+		generation_id TEXT NOT NULL REFERENCES generations(id) ON DELETE CASCADE,
+		stage_name TEXT NOT NULL,
+		status TEXT NOT NULL CHECK(status IN ('pending', 'processing', 'completed', 'failed', 'skipped')),
+		input_context TEXT,
+		output_payload TEXT,
+		tokens_used INTEGER DEFAULT 0,
+		duration_ms INTEGER DEFAULT 0,
+		error_message TEXT,
+		created_at DATETIME NOT NULL,
+		completed_at DATETIME
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_gen_stages_gen ON generation_stages(generation_id);
+	`
+	if _, err := db.Exec(chunkingSchema); err != nil {
+		return fmt.Errorf("failed to apply chunking schema: %w", err)
+	}
+
+	_ = db.addColumnIfNotExists("generations", "system_map_md", "TEXT")
+	_ = db.addColumnIfNotExists("generations", "completeness_scorecard_json", "TEXT")
+	_ = db.addColumnIfNotExists("generations", "total_tokens", "INTEGER DEFAULT 0")
+	_ = db.addColumnIfNotExists("projects", "llm_config_id", "TEXT REFERENCES llm_configs(id)")
+
+	tokenUsageSchema := `
+	CREATE TABLE IF NOT EXISTS project_token_usage (
+		id TEXT PRIMARY KEY,
+		project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+		generation_id TEXT REFERENCES generations(id) ON DELETE CASCADE,
+		document_id TEXT REFERENCES documents(id) ON DELETE SET NULL,
+		stage_id TEXT REFERENCES generation_stages(id) ON DELETE SET NULL,
+		operation TEXT NOT NULL,
+		model_used TEXT NOT NULL,
+		input_tokens INTEGER DEFAULT 0,
+		output_tokens INTEGER DEFAULT 0,
+		total_tokens INTEGER DEFAULT 0,
+		created_at DATETIME NOT NULL
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_token_usage_project ON project_token_usage(project_id);
+	CREATE INDEX IF NOT EXISTS idx_token_usage_gen ON project_token_usage(generation_id);
+	CREATE INDEX IF NOT EXISTS idx_token_usage_op ON project_token_usage(operation);
+	`
+	if _, err := db.Exec(tokenUsageSchema); err != nil {
+		return fmt.Errorf("failed to apply token usage schema: %w", err)
+	}
 
 	return nil
 }
