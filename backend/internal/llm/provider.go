@@ -116,7 +116,7 @@ type Provider interface {
 
 // Factory creates a provider based on config
 func NewProvider(cfg *models.LLMConfig, decryptedKey string) Provider {
-	if cfg == nil || decryptedKey == "" {
+	if cfg == nil {
 		return NewMockProvider("mock-provider")
 	}
 
@@ -154,7 +154,7 @@ func NewOpenAIProvider(apiKey, baseURL, defaultModel string) *OpenAIProvider {
 		apiKey:       apiKey,
 		baseURL:      baseURL,
 		defaultModel: defaultModel,
-		client:       &http.Client{Timeout: 120 * time.Second},
+		client:       &http.Client{Timeout: 300 * time.Second},
 	}
 }
 
@@ -223,14 +223,37 @@ func (p *OpenAIProvider) callChat(ctx context.Context, systemPrompt, userPrompt,
 		return "", 0, 0, 0, err
 	}
 
-	url := fmt.Sprintf("%s/chat/completions", p.baseURL)
+	baseURL := strings.TrimRight(p.baseURL, "/")
+	var endpointPath, query string
+	if idx := strings.Index(baseURL, "?"); idx != -1 {
+		endpointPath = baseURL[:idx]
+		query = baseURL[idx:]
+	} else {
+		endpointPath = baseURL
+	}
+	endpointPath = strings.TrimRight(endpointPath, "/")
+
+	var url string
+	if strings.HasSuffix(endpointPath, "/chat/completions") {
+		url = endpointPath + query
+	} else if strings.HasSuffix(endpointPath, "/v1") {
+		url = fmt.Sprintf("%s/chat/completions%s", endpointPath, query)
+	} else if strings.Contains(endpointPath, "openai.azure.com") {
+		url = fmt.Sprintf("%s/chat/completions%s", endpointPath, query)
+	} else {
+		url = fmt.Sprintf("%s/v1/chat/completions%s", endpointPath, query)
+	}
+
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBytes))
 	if err != nil {
 		return "", 0, 0, 0, err
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", p.apiKey))
+	if p.apiKey != "" {
+		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", p.apiKey))
+		httpReq.Header.Set("api-key", p.apiKey)
+	}
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
@@ -244,16 +267,25 @@ func (p *OpenAIProvider) callChat(ctx context.Context, systemPrompt, userPrompt,
 	}
 
 	var chatResp openAIChatResponse
-	if err := json.Unmarshal(respBytes, &chatResp); err != nil {
-		return "", 0, 0, 0, fmt.Errorf("failed to decode response: %w (raw: %s)", err, string(respBytes))
+	_ = json.Unmarshal(respBytes, &chatResp)
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if chatResp.Error != nil && chatResp.Error.Message != "" {
+			return "", 0, 0, 0, fmt.Errorf("llm api error (HTTP %d): %s", resp.StatusCode, chatResp.Error.Message)
+		}
+		rawMsg := strings.TrimSpace(string(respBytes))
+		if len(rawMsg) > 300 {
+			rawMsg = rawMsg[:300] + "..."
+		}
+		return "", 0, 0, 0, fmt.Errorf("llm api request failed with HTTP %d: %s", resp.StatusCode, rawMsg)
 	}
 
-	if chatResp.Error != nil {
-		return "", 0, 0, 0, fmt.Errorf("openai api error: %s", chatResp.Error.Message)
+	if chatResp.Error != nil && chatResp.Error.Message != "" {
+		return "", 0, 0, 0, fmt.Errorf("llm api error: %s", chatResp.Error.Message)
 	}
 
 	if len(chatResp.Choices) == 0 {
-		return "", 0, 0, 0, fmt.Errorf("no choices returned from openai")
+		return "", 0, 0, 0, fmt.Errorf("no choices returned from llm (raw response: %s)", string(respBytes))
 	}
 
 	inTok := chatResp.Usage.PromptTokens
@@ -501,14 +533,26 @@ func (p *AnthropicProvider) callMessages(ctx context.Context, systemPrompt, user
 		return "", 0, 0, 0, err
 	}
 
-	url := fmt.Sprintf("%s/messages", p.baseURL)
+	baseURL := strings.TrimRight(p.baseURL, "/")
+	if baseURL == "" {
+		baseURL = "https://api.anthropic.com/v1"
+	}
+	var url string
+	if strings.HasSuffix(baseURL, "/messages") {
+		url = baseURL
+	} else {
+		url = fmt.Sprintf("%s/messages", baseURL)
+	}
+
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBytes))
 	if err != nil {
 		return "", 0, 0, 0, err
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", p.apiKey)
+	if p.apiKey != "" {
+		httpReq.Header.Set("x-api-key", p.apiKey)
+	}
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
 	resp, err := p.client.Do(httpReq)
@@ -523,11 +567,20 @@ func (p *AnthropicProvider) callMessages(ctx context.Context, systemPrompt, user
 	}
 
 	var aResp anthropicResponse
-	if err := json.Unmarshal(respBytes, &aResp); err != nil {
-		return "", 0, 0, 0, err
+	_ = json.Unmarshal(respBytes, &aResp)
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if aResp.Error != nil && aResp.Error.Message != "" {
+			return "", 0, 0, 0, fmt.Errorf("anthropic error (HTTP %d): %s", resp.StatusCode, aResp.Error.Message)
+		}
+		rawMsg := strings.TrimSpace(string(respBytes))
+		if len(rawMsg) > 300 {
+			rawMsg = rawMsg[:300] + "..."
+		}
+		return "", 0, 0, 0, fmt.Errorf("anthropic request failed with HTTP %d: %s", resp.StatusCode, rawMsg)
 	}
 
-	if aResp.Error != nil {
+	if aResp.Error != nil && aResp.Error.Message != "" {
 		return "", 0, 0, 0, fmt.Errorf("anthropic error: %s", aResp.Error.Message)
 	}
 

@@ -53,3 +53,38 @@ func TestMockProviderMultiStage(t *testing.T) {
 		t.Errorf("expected avoided words to be replaced, got: %s", scResp.UpdatedMarkdown)
 	}
 }
+
+func TestNewProviderResolution(t *testing.T) {
+	// Nil config -> mock
+	pNil := llm.NewProvider(nil, "")
+	if pNil.Name() != "mock-llm" {
+		t.Errorf("expected mock-llm for nil config, got %s", pNil.Name())
+	}
+
+	// Mock config
+	pMock := llm.NewProvider(&models.LLMConfig{Provider: "mock", DefaultModel: "test-model"}, "")
+	if pMock.Name() != "mock-llm" {
+		t.Errorf("expected mock-llm for mock config, got %s", pMock.Name())
+	}
+
+	// Local/Ollama config without API key -> MUST NOT be mock!
+	pOllama := llm.NewProvider(&models.LLMConfig{
+		Provider:     "azure",
+		BaseURL:      "http://localhost:11434/v1",
+		DefaultModel: "gemma4:31b-cloud",
+	}, "")
+	if pOllama.Name() != "openai-compatible" {
+		t.Fatalf("expected openai-compatible for local provider without key, got %s", pOllama.Name())
+	}
+
+	// Anthropic
+	pAnthropic := llm.NewProvider(&models.LLMConfig{
+		Provider:     "anthropic",
+		BaseURL:      "https://api.anthropic.com/v1",
+		DefaultModel: "claude-3-5-sonnet",
+	}, "test-key")
+	if pAnthropic.Name() != "anthropic" {
+		t.Fatalf("expected anthropic provider, got %s", pAnthropic.Name())
+	}
+}
+

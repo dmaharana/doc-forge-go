@@ -127,6 +127,11 @@ func (s *GenerationService) processNextQueuedJob(ctx context.Context) {
 	}
 
 	provider := llm.NewProvider(llmCfg, decryptedKey)
+	var modelName string
+	if llmCfg != nil {
+		modelName = llmCfg.DefaultModel
+	}
+	log.Printf("[WORKER] Using LLM provider %q (model: %q) for generation %s", provider.Name(), modelName, gen.ID)
 
 	// ==================== STAGE 1: SYSTEM MAPPING ====================
 	sysStage := &models.GenerationStage{
@@ -155,30 +160,44 @@ func (s *GenerationService) processNextQueuedJob(ctx context.Context) {
 	}
 
 	sysResp, err := provider.GenerateSystemMap(ctx, sysReq)
-	systemMapMD := ""
-	if err == nil && sysResp != nil {
-		systemMapMD = sysResp.Markdown
-		sysStage.Status = models.StageCompleted
-		sysStage.OutputPayload = systemMapMD
-		sysStage.TokensUsed = sysResp.TokensUsed
-		_ = s.repo.RecordTokenUsage(&models.TokenUsage{
-			ProjectID:    project.ID,
-			GenerationID: &gen.ID,
-			StageID:      &sysStage.ID,
-			Operation:    "system_mapping",
-			ModelUsed:    sysResp.ModelUsed,
-			InputTokens:  sysResp.InputTokens,
-			OutputTokens: sysResp.OutputTokens,
-			TotalTokens:  sysResp.TokensUsed,
-		})
-	} else {
-		sysStage.Status = models.StageCompleted
-	}
 	sysStage.DurationMs = time.Since(sysStartTime).Milliseconds()
-	_ = s.repo.UpdateGenerationStage(sysStage)
-	if systemMapMD != "" {
-		_ = s.repo.UpdateGenerationSystemMap(gen.ID, systemMapMD)
+
+	if err != nil {
+		sysStage.Status = models.StageFailed
+		sysStage.ErrorMessage = err.Error()
+		_ = s.repo.UpdateGenerationStage(sysStage)
+
+		failMsg := fmt.Sprintf("system mapping failed: %v", err)
+		log.Printf("[WORKER] Generation %s failed at system mapping: %v", gen.ID, err)
+		_ = s.repo.UpdateGenerationStatus(gen.ID, models.GenerationFailed, sysReq.Model, failMsg)
+		return
 	}
+	if sysResp == nil || strings.TrimSpace(sysResp.Markdown) == "" {
+		sysStage.Status = models.StageFailed
+		sysStage.ErrorMessage = "system mapping returned empty content"
+		_ = s.repo.UpdateGenerationStage(sysStage)
+
+		log.Printf("[WORKER] Generation %s failed: system mapping returned empty content", gen.ID)
+		_ = s.repo.UpdateGenerationStatus(gen.ID, models.GenerationFailed, sysReq.Model, "system mapping returned empty content")
+		return
+	}
+
+	systemMapMD := sysResp.Markdown
+	sysStage.Status = models.StageCompleted
+	sysStage.OutputPayload = systemMapMD
+	sysStage.TokensUsed = sysResp.TokensUsed
+	_ = s.repo.RecordTokenUsage(&models.TokenUsage{
+		ProjectID:    project.ID,
+		GenerationID: &gen.ID,
+		StageID:      &sysStage.ID,
+		Operation:    "system_mapping",
+		ModelUsed:    sysResp.ModelUsed,
+		InputTokens:  sysResp.InputTokens,
+		OutputTokens: sysResp.OutputTokens,
+		TotalTokens:  sysResp.TokensUsed,
+	})
+	_ = s.repo.UpdateGenerationStage(sysStage)
+	_ = s.repo.UpdateGenerationSystemMap(gen.ID, systemMapMD)
 
 	// ==================== STAGE 2: COMPLETENESS VALIDATION ====================
 	compStage := &models.GenerationStage{
@@ -190,7 +209,11 @@ func (s *GenerationService) processNextQueuedJob(ctx context.Context) {
 	compStartTime := time.Now()
 
 	scorecard, err := s.completeness.EvaluateProject(ctx, gen.ProjectID)
-	if err == nil && scorecard != nil {
+	compStage.DurationMs = time.Since(compStartTime).Milliseconds()
+	if err != nil {
+		compStage.Status = models.StageFailed
+		compStage.ErrorMessage = err.Error()
+	} else if scorecard != nil {
 		compJSON := s.completeness.ToJSON(scorecard)
 		compStage.Status = models.StageCompleted
 		compStage.OutputPayload = compJSON
@@ -198,7 +221,6 @@ func (s *GenerationService) processNextQueuedJob(ctx context.Context) {
 	} else {
 		compStage.Status = models.StageCompleted
 	}
-	compStage.DurationMs = time.Since(compStartTime).Milliseconds()
 	_ = s.repo.UpdateGenerationStage(compStage)
 
 	// Parse template types
@@ -230,12 +252,23 @@ func (s *GenerationService) processNextQueuedJob(ctx context.Context) {
 		_ = s.repo.CreateGenerationStage(secStage)
 		secStartTime := time.Now()
 
-		contentMD, modelUsed, tokensUsed := s.synthesizeDocument(ctx, gen, project, secStage.ID, tmplType, systemMapMD, provider, llmCfg, sources)
+		contentMD, modelUsed, tokensUsed, synErr := s.synthesizeDocument(ctx, gen, project, secStage.ID, tmplType, systemMapMD, provider, llmCfg, sources)
 		lastModelUsed = modelUsed
+		secStage.DurationMs = time.Since(secStartTime).Milliseconds()
+
+		if synErr != nil {
+			secStage.Status = models.StageFailed
+			secStage.ErrorMessage = synErr.Error()
+			_ = s.repo.UpdateGenerationStage(secStage)
+
+			failMsg := fmt.Sprintf("failed to synthesize document %s: %v", tmplType, synErr)
+			log.Printf("[WORKER] Generation %s failed at %s: %v", gen.ID, tmplType, synErr)
+			_ = s.repo.UpdateGenerationStatus(gen.ID, models.GenerationFailed, lastModelUsed, failMsg)
+			return
+		}
 
 		secStage.Status = models.StageCompleted
 		secStage.TokensUsed = tokensUsed
-		secStage.DurationMs = time.Since(secStartTime).Milliseconds()
 		_ = s.repo.UpdateGenerationStage(secStage)
 
 		doc := &models.Document{
@@ -263,7 +296,13 @@ func (s *GenerationService) processNextQueuedJob(ctx context.Context) {
 		preStartTime := time.Now()
 
 		report, finalMD, preErr := s.prereview.RunPreReview(ctx, doc, provider, gen.ProjectID, llmCfg)
-		if preErr == nil && report != nil {
+		preStage.DurationMs = time.Since(preStartTime).Milliseconds()
+
+		if preErr != nil {
+			preStage.Status = models.StageFailed
+			preStage.ErrorMessage = preErr.Error()
+			log.Printf("[WORKER] Pre-review check failed for %s: %v", doc.Title, preErr)
+		} else if report != nil {
 			preStage.Status = models.StageCompleted
 			preStage.TokensUsed = report.TokensUsed
 			if report.TokensUsed > 0 {
@@ -286,7 +325,6 @@ func (s *GenerationService) processNextQueuedJob(ctx context.Context) {
 		} else {
 			preStage.Status = models.StageCompleted
 		}
-		preStage.DurationMs = time.Since(preStartTime).Milliseconds()
 		_ = s.repo.UpdateGenerationStage(preStage)
 
 		docsCreated++
@@ -311,7 +349,7 @@ func (s *GenerationService) processNextQueuedJob(ctx context.Context) {
 	log.Printf("[WORKER] Generation %s completed with %d documents synthesized", gen.ID, docsCreated)
 }
 
-func (s *GenerationService) synthesizeDocument(ctx context.Context, gen *models.Generation, project *models.Project, stageID string, tmplType, systemMapMD string, provider llm.Provider, llmCfg *models.LLMConfig, sources []models.Source) (string, string, int) {
+func (s *GenerationService) synthesizeDocument(ctx context.Context, gen *models.Generation, project *models.Project, stageID string, tmplType, systemMapMD string, provider llm.Provider, llmCfg *models.LLMConfig, sources []models.Source) (string, string, int, error) {
 	if tmplType == "product_spec" || tmplType == "runbook" {
 		return s.synthesizeSectionBySection(ctx, gen, project, stageID, tmplType, systemMapMD, provider, llmCfg)
 	}
@@ -346,7 +384,10 @@ func (s *GenerationService) synthesizeDocument(ctx context.Context, gen *models.
 
 	genResp, err := provider.Generate(ctx, genReq)
 	if err != nil {
-		return baseTmpl, "template-fallback", 0
+		return "", "", 0, fmt.Errorf("llm generation failed for %s: %w", tmplType, err)
+	}
+	if genResp == nil || strings.TrimSpace(genResp.MarkdownContent) == "" {
+		return "", "", 0, fmt.Errorf("llm returned empty content for %s", tmplType)
 	}
 
 	_ = s.repo.RecordTokenUsage(&models.TokenUsage{
@@ -360,10 +401,10 @@ func (s *GenerationService) synthesizeDocument(ctx context.Context, gen *models.
 		TotalTokens:  genResp.TokensUsed,
 	})
 
-	return genResp.MarkdownContent, genResp.ModelUsed, genResp.TokensUsed
+	return genResp.MarkdownContent, genResp.ModelUsed, genResp.TokensUsed, nil
 }
 
-func (s *GenerationService) synthesizeSectionBySection(ctx context.Context, gen *models.Generation, project *models.Project, stageID string, tmplType, systemMapMD string, provider llm.Provider, llmCfg *models.LLMConfig) (string, string, int) {
+func (s *GenerationService) synthesizeSectionBySection(ctx context.Context, gen *models.Generation, project *models.Project, stageID string, tmplType, systemMapMD string, provider llm.Provider, llmCfg *models.LLMConfig) (string, string, int, error) {
 	sections := []struct {
 		Title string
 		Goal  string
@@ -411,22 +452,31 @@ func (s *GenerationService) synthesizeSectionBySection(ctx context.Context, gen 
 		}
 
 		resp, err := provider.GenerateSection(ctx, secReq)
-		if err == nil && resp != nil {
-			sectionMDs = append(sectionMDs, resp.Markdown)
-			lastModel = resp.ModelUsed
-			totalTokens += resp.TokensUsed
-
-			_ = s.repo.RecordTokenUsage(&models.TokenUsage{
-				ProjectID:    project.ID,
-				GenerationID: &gen.ID,
-				StageID:      &stageID,
-				Operation:    "section_population",
-				ModelUsed:    resp.ModelUsed,
-				InputTokens:  resp.InputTokens,
-				OutputTokens: resp.OutputTokens,
-				TotalTokens:  resp.TokensUsed,
-			})
+		if err != nil {
+			return "", lastModel, totalTokens, fmt.Errorf("failed generating section %q: %w", sec.Title, err)
 		}
+		if resp == nil || strings.TrimSpace(resp.Markdown) == "" {
+			return "", lastModel, totalTokens, fmt.Errorf("section %q returned empty markdown", sec.Title)
+		}
+
+		sectionMDs = append(sectionMDs, resp.Markdown)
+		lastModel = resp.ModelUsed
+		totalTokens += resp.TokensUsed
+
+		_ = s.repo.RecordTokenUsage(&models.TokenUsage{
+			ProjectID:    project.ID,
+			GenerationID: &gen.ID,
+			StageID:      &stageID,
+			Operation:    "section_population",
+			ModelUsed:    resp.ModelUsed,
+			InputTokens:  resp.InputTokens,
+			OutputTokens: resp.OutputTokens,
+			TotalTokens:  resp.TokensUsed,
+		})
+	}
+
+	if len(sectionMDs) == 0 {
+		return "", lastModel, totalTokens, fmt.Errorf("no sections were generated for %s", tmplType)
 	}
 
 	docTitle := templates.GetTemplateTitle(tmplType, project.Name)
@@ -442,7 +492,7 @@ func (s *GenerationService) synthesizeSectionBySection(ctx context.Context, gen 
 		fullDoc.WriteString(sMD + "\n\n")
 	}
 
-	return fullDoc.String(), lastModel, totalTokens
+	return fullDoc.String(), lastModel, totalTokens, nil
 }
 
 // UpdateWithFeedback performs the AI revision loop
@@ -466,7 +516,20 @@ func (s *GenerationService) UpdateWithFeedback(ctx context.Context, documentID, 
 	project, _ := s.repo.GetProjectByID(doc.ProjectID)
 	sources, _ := s.repo.ListSourcesByProject(doc.ProjectID)
 
-	llmCfg, _ := s.repo.GetActiveLLMConfig()
+	var llmCfg *models.LLMConfig
+	if project != nil && project.LLMConfigID != nil && *project.LLMConfigID != "" {
+		cfgList, _ := s.repo.ListLLMConfigs()
+		for _, c := range cfgList {
+			if c.ID == *project.LLMConfigID {
+				llmCfg = &c
+				break
+			}
+		}
+	}
+	if llmCfg == nil {
+		llmCfg, _ = s.repo.GetActiveLLMConfig()
+	}
+
 	var decryptedKey string
 	if llmCfg != nil && llmCfg.APIKeyEncrypted != "" {
 		decryptedKey, _ = crypto.Decrypt(llmCfg.APIKeyEncrypted, s.cfg.EncryptionKey)

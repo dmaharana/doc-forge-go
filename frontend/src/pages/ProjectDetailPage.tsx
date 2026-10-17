@@ -900,12 +900,18 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
                               : g.status === 'processing'
                               ? 'bg-blue-100 text-blue-800 animate-pulse'
                               : g.status === 'failed'
-                              ? 'bg-red-100 text-red-800'
+                              ? 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300'
                               : 'bg-amber-100 text-amber-800'
                           }`}
+                          title={g.error_message || undefined}
                         >
                           {g.status}
                         </span>
+                        {g.error_message && (
+                          <div className="text-[10px] text-red-600 dark:text-red-400 truncate max-w-[200px] mt-1" title={g.error_message}>
+                            {g.error_message}
+                          </div>
+                        )}
                       </td>
                       <td className="py-3 px-4 font-mono text-[11px] font-semibold text-foreground">
                         {g.template_set}

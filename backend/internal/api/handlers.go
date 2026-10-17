@@ -261,6 +261,13 @@ func (h *Handlers) AdminSaveLLMConfig(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 		}
+	} else if req.IsActive {
+		// If ID was not provided but we're activating, preserve key from current active config if provider/baseURL match
+		if active, err := h.repo.GetActiveLLMConfig(); err == nil && active != nil && active.APIKeyEncrypted != "" {
+			if req.Provider == active.Provider {
+				encKey = active.APIKeyEncrypted
+			}
+		}
 	}
 
 	cfg := &models.LLMConfig{

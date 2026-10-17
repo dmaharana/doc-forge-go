@@ -702,4 +702,136 @@ func TestProjectTokenUsageEndpoint(t *testing.T) {
 	}
 }
 
+func TestGenerationFailsWhenLLMErrors(t *testing.T) {
+	router, _, repo, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// 1. Login as admin
+	loginBody, _ := json.Marshal(map[string]string{
+		"email":    "admin@docforge.test",
+		"password": "AdminPassword123!",
+	})
+	req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewReader(loginBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login failed: %d", w.Code)
+	}
+
+	var loginResp LoginResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &loginResp)
+	authHeader := "Bearer " + loginResp.Token
+
+	// 2. Create an LLM config that points to an unreachable endpoint
+	badLLM := &models.LLMConfig{
+		Provider:     "openai",
+		BaseURL:      "http://127.0.0.1:59999/v1", // Unreachable port
+		DefaultModel: "test-model",
+		IsActive:     true,
+	}
+	if err := repo.SaveLLMConfig(badLLM); err != nil {
+		t.Fatalf("failed to save LLM config: %v", err)
+	}
+
+	// 3. Create project
+	projBody, _ := json.Marshal(map[string]any{
+		"name":          "LLM Error Test Project",
+		"description":   "Project to test LLM error handling",
+		"llm_config_id": badLLM.ID,
+	})
+	req = httptest.NewRequest("POST", "/api/v1/projects", bytes.NewReader(projBody))
+	req.Header.Set("Authorization", authHeader)
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("failed to create project: %d", w.Code)
+	}
+
+	var project models.Project
+	_ = json.Unmarshal(w.Body.Bytes(), &project)
+
+	// 4. Create source
+	src := &models.Source{
+		ProjectID:     project.ID,
+		Name:          "sample.go",
+		Type:          models.SourceTypeUpload,
+		ExtractedText: "package main\nfunc main() {}",
+		Status:        "ready",
+	}
+	if err := repo.CreateSource(src); err != nil {
+		t.Fatalf("failed to create source: %v", err)
+	}
+
+	// 5. Submit generation
+	genReqBody, _ := json.Marshal(map[string]any{
+		"template_set":  "product_spec",
+		"source_ids":    []string{src.ID},
+		"llm_config_id": badLLM.ID,
+	})
+	req = httptest.NewRequest("POST", fmt.Sprintf("/api/v1/projects/%s/generations", project.ID), bytes.NewReader(genReqBody))
+	req.Header.Set("Authorization", authHeader)
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("failed to submit generation: %d", w.Code)
+	}
+
+	var gen models.Generation
+	_ = json.Unmarshal(w.Body.Bytes(), &gen)
+
+	// 6. Wait for worker to process
+	var completedGen *models.Generation
+	for i := 0; i < 30; i++ {
+		time.Sleep(150 * time.Millisecond)
+		completedGen, _ = repo.GetGenerationByID(gen.ID)
+		if completedGen != nil && (completedGen.Status == models.GenerationCompleted || completedGen.Status == models.GenerationFailed) {
+			break
+		}
+	}
+
+	if completedGen == nil {
+		t.Fatal("generation was never processed")
+	}
+
+	// MUST be failed, NOT completed!
+	if completedGen.Status != models.GenerationFailed {
+		t.Fatalf("expected generation status to be failed, but got %q", completedGen.Status)
+	}
+
+	if completedGen.ErrorMessage == "" {
+		t.Fatalf("expected generation error_message to be set, but was empty")
+	}
+
+	// Verify stages
+	stages, err := repo.ListGenerationStages(gen.ID)
+	if err != nil {
+		t.Fatalf("failed to list stages: %v", err)
+	}
+	hasFailedStage := false
+	for _, st := range stages {
+		if st.Status == models.StageFailed {
+			hasFailedStage = true
+			if st.ErrorMessage == "" {
+				t.Errorf("failed stage %s has empty error message", st.StageName)
+			}
+		}
+	}
+	if !hasFailedStage {
+		t.Fatalf("expected at least one stage to be marked failed, got stages: %+v", stages)
+	}
+
+	// Verify NO documents were created
+	docs, err := repo.ListDocumentsByProject(project.ID)
+	if err != nil {
+		t.Fatalf("failed to list documents: %v", err)
+	}
+	if len(docs) != 0 {
+		t.Fatalf("expected 0 documents on failed generation, got %d", len(docs))
+	}
+}
+
+
 

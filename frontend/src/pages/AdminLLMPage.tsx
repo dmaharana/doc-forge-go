@@ -10,6 +10,7 @@ export const AdminLLMPage: React.FC = () => {
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
   // Form states
+  const [configId, setConfigId] = useState<string>('');
   const [provider, setProvider] = useState('openai');
   const [apiKey, setApiKey] = useState('');
   const [baseURL, setBaseURL] = useState('');
@@ -24,6 +25,7 @@ export const AdminLLMPage: React.FC = () => {
       setConfigs(list || []);
       const active = (list || []).find((c) => c.is_active);
       if (active) {
+        setConfigId(active.id);
         setProvider(active.provider);
         setBaseURL(active.base_url || '');
         setDefaultModel(active.default_model);
@@ -42,6 +44,7 @@ export const AdminLLMPage: React.FC = () => {
   }, []);
 
   const handleProviderPreset = (p: string) => {
+    setConfigId('');
     setProvider(p);
     if (p === 'openai') {
       setBaseURL('https://api.openai.com/v1');
@@ -64,6 +67,7 @@ export const AdminLLMPage: React.FC = () => {
     setSuccessMsg(null);
     try {
       await api.adminSaveLLM({
+        id: configId || undefined,
         provider,
         api_key: apiKey || undefined,
         base_url: baseURL,
