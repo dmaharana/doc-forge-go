@@ -1,4 +1,5 @@
-server
+/docforge-*
+/server
 *.db
 *.db-shm
 *.db-wal
