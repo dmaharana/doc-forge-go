@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { ArchitecturalDiagram } from '@/components/ArchitecturalDiagram';
 import type {
   AtlassianPage,
   AtlassianSpace,
@@ -655,6 +656,27 @@ export const DocumentReviewPage: React.FC<DocumentReviewPageProps> = ({
                     li: ({ children }) => <li>{renderWithHighlights(children)}</li>,
                     td: ({ children }) => <td className="p-2">{renderWithHighlights(children)}</td>,
                     th: ({ children }) => <th className="p-2">{renderWithHighlights(children)}</th>,
+                    pre: ({ children, ...props }) => {
+                      if (
+                        React.isValidElement(children) &&
+                        typeof (children.props as any)?.className === 'string' &&
+                        (children.props as any).className.includes('language-mermaid')
+                      ) {
+                        return <>{children}</>;
+                      }
+                      return <pre {...props}>{children}</pre>;
+                    },
+                    code: ({ className, children, ...props }) => {
+                      const isMermaid = /language-mermaid/.test(className || '');
+                      if (isMermaid) {
+                        return <ArchitecturalDiagram code={String(children).replace(/\n$/, '')} />;
+                      }
+                      return (
+                        <code className={className} {...props}>
+                          {children}
+                        </code>
+                      );
+                    },
                   }}
                 >
                   {displayContent}

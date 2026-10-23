@@ -871,8 +871,11 @@ func (s *AtlassianService) PublishDocument(ctx context.Context, userID, projectI
 
 	client := &http.Client{Timeout: 30 * time.Second}
 
-	// Build Confluence storage format body from markdown content
-	storageBody := fmt.Sprintf("<pre>%s</pre>", html.EscapeString(doc.ContentMD))
+	// Build Confluence storage format body from markdown content in well-formed XHTML
+	storageBody, err := MarkdownToConfluenceStorage(doc.ContentMD)
+	if err != nil {
+		storageBody = fmt.Sprintf("<pre>%s</pre>", html.EscapeString(doc.ContentMD))
+	}
 
 	// 1. Try Confluence REST API v2: POST /wiki/api/v2/pages (Standard modern Cloud API)
 	// First resolve numeric spaceId
