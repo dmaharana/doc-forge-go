@@ -113,6 +113,7 @@ func NewRouter(cfg *config.Config, repo *repository.Repository, handlers *Handle
 				r.Get("/{id}/confluence-target", handlers.GetProjectConfluenceTarget)
 				r.Post("/{id}/confluence-target", handlers.SetProjectConfluenceTarget)
 				r.Delete("/{id}/confluence-target", handlers.DeleteProjectConfluenceTarget)
+				r.Get("/{id}/confluence/sites", handlers.ListProjectConfluenceSites)
 				r.Get("/{id}/confluence/spaces", handlers.ListProjectConfluenceSpaces)
 				r.Get("/{id}/confluence/pages", handlers.ListProjectConfluencePages)
 			})
@@ -142,6 +143,7 @@ func NewRouter(cfg *config.Config, repo *repository.Repository, handlers *Handle
 			r.Route("/atlassian", func(r chi.Router) {
 				r.Get("/connect", handlers.AtlassianConnect)
 				r.Get("/callback", handlers.AtlassianCallback)
+				r.Get("/sites", handlers.AtlassianListSites)
 				r.Get("/spaces", handlers.AtlassianListSpaces)
 			})
 

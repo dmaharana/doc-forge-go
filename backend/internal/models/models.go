@@ -116,6 +116,9 @@ type ConfluenceTarget struct {
 	ID              string     `json:"id"`
 	ProjectID       string     `json:"project_id"`
 	ConnectionID    string     `json:"connection_id,omitempty"`
+	CloudID         string     `json:"cloud_id,omitempty"`
+	SiteURL         string     `json:"site_url,omitempty"`
+	SiteName        string     `json:"site_name,omitempty"`
 	SpaceKey        string     `json:"space_key"`
 	SpaceName       string     `json:"space_name"`
 	ParentPageID    string     `json:"parent_page_id,omitempty"`

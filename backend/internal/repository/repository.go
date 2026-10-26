@@ -930,12 +930,21 @@ func (r *Repository) UpsertConfluenceTarget(t *models.ConfluenceTarget) error {
 
 	if existing != nil {
 		t.ID = existing.ID
+		if t.CloudID == "" {
+			t.CloudID = existing.CloudID
+		}
+		if t.SiteURL == "" {
+			t.SiteURL = existing.SiteURL
+		}
+		if t.SiteName == "" {
+			t.SiteName = existing.SiteName
+		}
 		query := `
 			UPDATE confluence_targets
-			SET space_key = ?, space_name = ?, parent_page_id = ?, parent_page_title = ?, updated_by = ?, updated_at = ?
+			SET cloud_id = ?, site_url = ?, site_name = ?, space_key = ?, space_name = ?, parent_page_id = ?, parent_page_title = ?, updated_by = ?, updated_at = ?
 			WHERE id = ?
 		`
-		_, err := r.db.Exec(query, t.SpaceKey, t.SpaceName, t.ParentPageID, t.ParentPageTitle, t.UpdatedBy, t.UpdatedAt, t.ID)
+		_, err := r.db.Exec(query, t.CloudID, t.SiteURL, t.SiteName, t.SpaceKey, t.SpaceName, t.ParentPageID, t.ParentPageTitle, t.UpdatedBy, t.UpdatedAt, t.ID)
 		return err
 	}
 
@@ -943,16 +952,16 @@ func (r *Repository) UpsertConfluenceTarget(t *models.ConfluenceTarget) error {
 		t.ID = uuid.New().String()
 	}
 	query := `
-		INSERT INTO confluence_targets (id, project_id, connection_id, space_key, space_name, parent_page_id, parent_page_title, updated_by, updated_at, is_default)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+		INSERT INTO confluence_targets (id, project_id, connection_id, cloud_id, site_url, site_name, space_key, space_name, parent_page_id, parent_page_title, updated_by, updated_at, is_default)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
 	`
-	_, err := r.db.Exec(query, t.ID, t.ProjectID, connID, t.SpaceKey, t.SpaceName, t.ParentPageID, t.ParentPageTitle, t.UpdatedBy, t.UpdatedAt)
+	_, err := r.db.Exec(query, t.ID, t.ProjectID, connID, t.CloudID, t.SiteURL, t.SiteName, t.SpaceKey, t.SpaceName, t.ParentPageID, t.ParentPageTitle, t.UpdatedBy, t.UpdatedAt)
 	return err
 }
 
 func (r *Repository) GetConfluenceTargetByProject(projectID string) (*models.ConfluenceTarget, error) {
 	query := `
-		SELECT ct.id, ct.project_id, ct.connection_id, ct.space_key, ct.space_name, ct.parent_page_id, ct.parent_page_title, ct.updated_by, u.name, ct.updated_at, ct.is_default
+		SELECT ct.id, ct.project_id, ct.connection_id, ct.cloud_id, ct.site_url, ct.site_name, ct.space_key, ct.space_name, ct.parent_page_id, ct.parent_page_title, ct.updated_by, u.name, ct.updated_at, ct.is_default
 		FROM confluence_targets ct
 		LEFT JOIN users u ON ct.updated_by = u.id
 		WHERE ct.project_id = ? LIMIT 1
@@ -960,15 +969,24 @@ func (r *Repository) GetConfluenceTargetByProject(projectID string) (*models.Con
 	row := r.db.QueryRow(query, projectID)
 
 	var t models.ConfluenceTarget
-	var connID, parentPageID, parentPageTitle, updatedBy, updaterName sql.NullString
+	var connID, cloudID, siteURL, siteName, parentPageID, parentPageTitle, updatedBy, updaterName sql.NullString
 	var updatedAt sql.NullTime
 	var isDefault int
-	err := row.Scan(&t.ID, &t.ProjectID, &connID, &t.SpaceKey, &t.SpaceName, &parentPageID, &parentPageTitle, &updatedBy, &updaterName, &updatedAt, &isDefault)
+	err := row.Scan(&t.ID, &t.ProjectID, &connID, &cloudID, &siteURL, &siteName, &t.SpaceKey, &t.SpaceName, &parentPageID, &parentPageTitle, &updatedBy, &updaterName, &updatedAt, &isDefault)
 	if err != nil {
 		return nil, err
 	}
 	if connID.Valid {
 		t.ConnectionID = connID.String
+	}
+	if cloudID.Valid {
+		t.CloudID = cloudID.String
+	}
+	if siteURL.Valid {
+		t.SiteURL = siteURL.String
+	}
+	if siteName.Valid {
+		t.SiteName = siteName.String
 	}
 	if parentPageID.Valid {
 		t.ParentPageID = parentPageID.String

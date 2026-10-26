@@ -278,13 +278,46 @@ func TestEndToEndHappyPath(t *testing.T) {
 		t.Fatalf("atlassian connect failed: %d", w.Code)
 	}
 
-	// 13. Project Confluence Spaces & Pages Discovery
+	// 13. Project Confluence Sites, Spaces & Pages Discovery
+	req = httptest.NewRequest("GET", fmt.Sprintf("/api/v1/projects/%s/confluence/sites", project.ID), nil)
+	req.Header.Set("Authorization", authHeader)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list confluence sites failed: %d", w.Code)
+	}
+	var sites []service.AtlassianSite
+	if err := json.Unmarshal(w.Body.Bytes(), &sites); err != nil || len(sites) < 2 {
+		t.Fatalf("expected at least 2 accessible sites, got %d, err: %v", len(sites), err)
+	}
+
 	req = httptest.NewRequest("GET", fmt.Sprintf("/api/v1/projects/%s/confluence/spaces", project.ID), nil)
 	req.Header.Set("Authorization", authHeader)
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("list confluence spaces failed: %d", w.Code)
+	}
+
+	// Verify query spaces for alternate site
+	req = httptest.NewRequest("GET", fmt.Sprintf("/api/v1/projects/%s/confluence/spaces?cloud_id=mock-cloud-id-456", project.ID), nil)
+	req.Header.Set("Authorization", authHeader)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list confluence spaces for site 456 failed: %d", w.Code)
+	}
+	var altSpaces []service.AtlassianSpace
+	_ = json.Unmarshal(w.Body.Bytes(), &altSpaces)
+	hasInfra := false
+	for _, sp := range altSpaces {
+		if sp.Key == "INFRA" {
+			hasInfra = true
+			break
+		}
+	}
+	if !hasInfra {
+		t.Fatalf("expected INFRA space in alternate site mock-cloud-id-456")
 	}
 
 	req = httptest.NewRequest("GET", fmt.Sprintf("/api/v1/projects/%s/confluence/pages?space_key=ENG", project.ID), nil)
@@ -295,8 +328,11 @@ func TestEndToEndHappyPath(t *testing.T) {
 		t.Fatalf("list confluence pages failed: %d", w.Code)
 	}
 
-	// 14. Set Project Confluence Target with Space and Parent Page
+	// 14. Set Project Confluence Target with Site, Space and Parent Page
 	targetBody, _ := json.Marshal(map[string]string{
+		"cloud_id":          "mock-cloud-id-123",
+		"site_name":         "Acme Engineering",
+		"site_url":          "https://mock-company.atlassian.net/wiki",
 		"space_key":         "ENG",
 		"space_name":        "Engineering & Architecture",
 		"parent_page_id":    "mock-page-1",
@@ -309,6 +345,10 @@ func TestEndToEndHappyPath(t *testing.T) {
 	router.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("set confluence target failed: %d", w.Code)
+	}
+	var savedTarget models.ConfluenceTarget
+	if err := json.Unmarshal(w.Body.Bytes(), &savedTarget); err != nil || savedTarget.CloudID != "mock-cloud-id-123" {
+		t.Fatalf("expected saved target to have cloud_id 'mock-cloud-id-123', got %+v", savedTarget)
 	}
 
 	// 15. Add Team Member to Project by Email

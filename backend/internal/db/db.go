@@ -122,6 +122,9 @@ func (db *DB) runMigrations() error {
 		id TEXT PRIMARY KEY,
 		project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
 		connection_id TEXT NOT NULL REFERENCES atlassian_connections(id) ON DELETE CASCADE,
+		cloud_id TEXT,
+		site_url TEXT,
+		site_name TEXT,
 		space_key TEXT NOT NULL,
 		space_name TEXT NOT NULL,
 		parent_page_id TEXT,
@@ -234,6 +237,9 @@ func (db *DB) runMigrations() error {
 	_ = db.addColumnIfNotExists("confluence_targets", "parent_page_title", "TEXT")
 	_ = db.addColumnIfNotExists("confluence_targets", "updated_by", "TEXT")
 	_ = db.addColumnIfNotExists("confluence_targets", "updated_at", "DATETIME")
+	_ = db.addColumnIfNotExists("confluence_targets", "cloud_id", "TEXT")
+	_ = db.addColumnIfNotExists("confluence_targets", "site_url", "TEXT")
+	_ = db.addColumnIfNotExists("confluence_targets", "site_name", "TEXT")
 
 	// Migration 003: Chunking, FTS5 Virtual Table, Generation Stages
 	chunkingSchema := `

@@ -176,10 +176,21 @@ export interface DocumentItem {
   feedback?: DocumentFeedback[];
 }
 
+export interface AtlassianSite {
+  id: string;
+  url: string;
+  name: string;
+  scopes?: string[];
+  avatar_url?: string;
+}
+
 export interface ConfluenceTarget {
   id: string;
   project_id: string;
   connection_id?: string;
+  cloud_id?: string;
+  site_url?: string;
+  site_name?: string;
   space_key: string;
   space_name: string;
   parent_page_id?: string;

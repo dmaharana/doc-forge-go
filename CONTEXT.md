@@ -33,7 +33,7 @@ A feedback item that must be resolved before a Document can be approved.
 _Avoid_: Blocker, gate, critical issue
 
 **Confluence Target**:
-The destination Confluence Cloud space and parent page mapped to a Project for publishing approved Documents.
+The destination Confluence Cloud site, space, and parent page mapped to a Project for publishing approved Documents.
 _Avoid_: Export destination, wiki link
 
 **Project Member**:

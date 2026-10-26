@@ -1,2 +1,2 @@
 backend/.env
-backend/internal/web/dist/
+backend/internal/web/dist/*

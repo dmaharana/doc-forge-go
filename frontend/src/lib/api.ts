@@ -1,5 +1,6 @@
 import type {
   AtlassianPage,
+  AtlassianSite,
   AtlassianSpace,
   CompletenessScorecard,
   ConfluenceTarget,
@@ -318,13 +319,25 @@ export const api = {
   },
 
   // Project-Scoped Confluence Target & Hierarchy
+  async getProjectConfluenceSites(projectId: string): Promise<AtlassianSite[]> {
+    return request<AtlassianSite[]>(`/projects/${projectId}/confluence/sites`);
+  },
+
   async getProjectConfluenceTarget(projectId: string): Promise<ConfluenceTarget | null> {
     return request<ConfluenceTarget | null>(`/projects/${projectId}/confluence-target`);
   },
 
   async setProjectConfluenceTarget(
     projectId: string,
-    data: { space_key: string; space_name: string; parent_page_id?: string; parent_page_title?: string }
+    data: {
+      cloud_id?: string;
+      site_url?: string;
+      site_name?: string;
+      space_key: string;
+      space_name: string;
+      parent_page_id?: string;
+      parent_page_title?: string;
+    }
   ): Promise<ConfluenceTarget> {
     return request<ConfluenceTarget>(`/projects/${projectId}/confluence-target`, {
       method: 'POST',
@@ -338,12 +351,16 @@ export const api = {
     });
   },
 
-  async getProjectConfluenceSpaces(projectId: string): Promise<AtlassianSpace[]> {
-    return request<AtlassianSpace[]>(`/projects/${projectId}/confluence/spaces`);
+  async getProjectConfluenceSpaces(projectId: string, cloudId?: string): Promise<AtlassianSpace[]> {
+    const q = cloudId ? `?cloud_id=${encodeURIComponent(cloudId)}` : '';
+    return request<AtlassianSpace[]>(`/projects/${projectId}/confluence/spaces${q}`);
   },
 
-  async getProjectConfluencePages(projectId: string, spaceKey?: string): Promise<AtlassianPage[]> {
-    const q = spaceKey ? `?space_key=${encodeURIComponent(spaceKey)}` : '';
+  async getProjectConfluencePages(projectId: string, spaceKey?: string, cloudId?: string): Promise<AtlassianPage[]> {
+    const params = new URLSearchParams();
+    if (spaceKey) params.set('space_key', spaceKey);
+    if (cloudId) params.set('cloud_id', cloudId);
+    const q = params.toString() ? `?${params.toString()}` : '';
     return request<AtlassianPage[]>(`/projects/${projectId}/confluence/pages${q}`);
   },
 

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import type {
   AtlassianPage,
+  AtlassianSite,
   AtlassianSpace,
   CompletenessScorecard,
   ConfluenceTarget,
@@ -26,6 +27,7 @@ import {
   Compass,
   Cpu,
   Download,
+  ExternalLink,
   Eye,
   FileCode,
   FileText,
@@ -63,6 +65,9 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
   const [loading, setLoading] = useState(true);
 
   // Confluence Target Management State
+  const [confluenceSites, setConfluenceSites] = useState<AtlassianSite[]>([]);
+  const [loadingSites, setLoadingSites] = useState(false);
+  const [selectedCloudId, setSelectedCloudId] = useState('');
   const [confluenceSpaces, setConfluenceSpaces] = useState<AtlassianSpace[]>([]);
   const [loadingSpaces, setLoadingSpaces] = useState(false);
   const [confluencePages, setConfluencePages] = useState<AtlassianPage[]>([]);
@@ -176,7 +181,7 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
 
   const loadAll = async () => {
     try {
-      const [p, s, g, d, ct, m, llms, tokens] = await Promise.all([
+      const [p, s, g, d, ct, m, llms, tokens, sites] = await Promise.all([
         api.getProject(projectId),
         api.listSources(projectId),
         api.listGenerations(projectId),
@@ -185,6 +190,7 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
         api.getProjectMembers(projectId).catch(() => []),
         api.getLLMConfigs().catch(() => []),
         api.getProjectTokenUsage(projectId).catch(() => null),
+        api.getProjectConfluenceSites(projectId).catch(() => []),
       ]);
       setProject(p);
       setSources(s || []);
@@ -196,7 +202,12 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
       setTokenSummary(tokens);
       setSelectedLLMId(p.llm_config_id || '');
       setSelectedGenLLMId(p.llm_config_id || '');
+      setConfluenceSites(sites || []);
+
+      let activeCloudId = '';
       if (ct) {
+        activeCloudId = ct.cloud_id || (sites?.length ? sites[0].id : '');
+        setSelectedCloudId(activeCloudId);
         setSelectedSpaceKey(ct.space_key);
         setSelectedParentPageId(ct.parent_page_id || '');
         setManualPageId(ct.parent_page_id || '');
@@ -204,8 +215,11 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
         if (ct.parent_page_id) {
           setUseManualPageId(true);
         }
+      } else if (sites?.length) {
+        activeCloudId = sites[0].id;
+        setSelectedCloudId(activeCloudId);
       }
-      loadSpaces();
+      loadSpaces(activeCloudId, ct?.space_key);
     } catch (err) {
       console.error(err);
     } finally {
@@ -213,17 +227,37 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
     }
   };
 
-  const loadSpaces = async () => {
-    setLoadingSpaces(true);
+  const loadSites = async () => {
+    setLoadingSites(true);
     try {
-      const sp = await api.getProjectConfluenceSpaces(projectId);
+      const sites = await api.getProjectConfluenceSites(projectId);
+      setConfluenceSites(sites || []);
+      if (sites?.length && !selectedCloudId) {
+        setSelectedCloudId(sites[0].id);
+        loadSpaces(sites[0].id);
+      }
+    } catch (err: any) {
+      console.error(err);
+    } finally {
+      setLoadingSites(false);
+    }
+  };
+
+  const loadSpaces = async (cloudId?: string, spaceKeyToKeep?: string) => {
+    setLoadingSpaces(true);
+    const targetCloudId = cloudId !== undefined ? cloudId : selectedCloudId;
+    try {
+      const sp = await api.getProjectConfluenceSpaces(projectId, targetCloudId || undefined);
       setConfluenceSpaces(sp || []);
-      if (sp?.length && !selectedSpaceKey) {
-        setSelectedSpaceKey(sp[0].key);
-        loadPages(sp[0].key);
-      } else if (selectedSpaceKey) {
-        loadPages(selectedSpaceKey);
-      } else if (!sp?.length) {
+      const currentSpaceKey = spaceKeyToKeep !== undefined ? spaceKeyToKeep : selectedSpaceKey;
+      if (sp?.length) {
+        if (!currentSpaceKey || !sp.some((s) => s.key === currentSpaceKey)) {
+          setSelectedSpaceKey(sp[0].key);
+          loadPages(sp[0].key, targetCloudId);
+        } else {
+          loadPages(currentSpaceKey, targetCloudId);
+        }
+      } else {
         setUseManualSpaceKey(true);
       }
     } catch (err: any) {
@@ -237,11 +271,12 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
     }
   };
 
-  const loadPages = async (spaceKey: string) => {
+  const loadPages = async (spaceKey: string, cloudId?: string) => {
     if (!spaceKey) return;
     setLoadingPages(true);
+    const targetCloudId = cloudId !== undefined ? cloudId : selectedCloudId;
     try {
-      const pg = await api.getProjectConfluencePages(projectId, spaceKey);
+      const pg = await api.getProjectConfluencePages(projectId, spaceKey, targetCloudId || undefined);
       setConfluencePages(pg || []);
     } catch {
       setConfluencePages([]);
@@ -250,9 +285,17 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
     }
   };
 
+  const handleSiteChange = (cloudId: string) => {
+    setSelectedCloudId(cloudId);
+    setSelectedSpaceKey('');
+    setSelectedParentPageId('');
+    setConfluencePages([]);
+    loadSpaces(cloudId, '');
+  };
+
   const handleSpaceChange = (spaceKey: string) => {
     setSelectedSpaceKey(spaceKey);
-    loadPages(spaceKey);
+    loadPages(spaceKey, selectedCloudId);
   };
 
   const handleSaveConfluence = async (e: React.FormEvent) => {
@@ -261,6 +304,7 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
     setSavingConfluenceTarget(true);
     setConfluenceMsg(null);
     try {
+      const siteObj = confluenceSites.find((s) => s.id === selectedCloudId);
       const spaceObj = confluenceSpaces.find((s) => s.key === selectedSpaceKey);
 
       // Determine parent page ID from manual input or list selection
@@ -283,6 +327,9 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
         : (manualPageTitle.trim() || (parentId ? 'Page ' + parentId : undefined));
 
       const target = await api.setProjectConfluenceTarget(projectId, {
+        cloud_id: selectedCloudId || undefined,
+        site_url: siteObj?.url || undefined,
+        site_name: siteObj?.name || undefined,
         space_key: selectedSpaceKey,
         space_name: spaceObj ? spaceObj.name : (manualSpaceName.trim() || selectedSpaceKey),
         parent_page_id: parentId || undefined,
@@ -307,7 +354,7 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
       setSelectedSpaceKey('');
       setSelectedParentPageId('');
       setConfluenceMsg({ type: 'success', text: 'Confluence Target disconnected.' });
-      loadSpaces();
+      loadSpaces(selectedCloudId);
       setTimeout(() => setConfluenceMsg(null), 4000);
     } catch (err: any) {
       alert(err.message || 'Failed to disconnect');
@@ -631,7 +678,9 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
                 {confluenceTarget ? (
                   <>
                     <Globe className="h-4 w-4 text-primary shrink-0" />
-                    <span>Space: {confluenceTarget.space_key}</span>
+                    <span>
+                      {confluenceTarget.site_name ? `${confluenceTarget.site_name} / ` : ''}Space: {confluenceTarget.space_key}
+                    </span>
                   </>
                 ) : (
                   <span className="text-muted-foreground text-sm font-normal">Not configured</span>
@@ -1111,7 +1160,27 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
                 </span>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-1">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4 pt-1">
+                <div className="space-y-1">
+                  <span className="text-xs uppercase font-semibold text-muted-foreground">Atlassian Site</span>
+                  <div className="font-medium text-sm truncate">{confluenceTarget.site_name || 'Default Atlassian Site'}</div>
+                  {confluenceTarget.site_url ? (
+                    <a
+                      href={confluenceTarget.site_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs text-primary hover:underline flex items-center gap-1 truncate"
+                    >
+                      <ExternalLink className="h-3 w-3 shrink-0" />
+                      {confluenceTarget.site_url.replace(/^https?:\/\//, '')}
+                    </a>
+                  ) : (
+                    <div className="text-xs text-muted-foreground font-mono">
+                      {confluenceTarget.cloud_id ? `ID: ${confluenceTarget.cloud_id}` : 'Connected Cloud'}
+                    </div>
+                  )}
+                </div>
+
                 <div className="space-y-1">
                   <span className="text-xs uppercase font-semibold text-muted-foreground">Target Space</span>
                   <div className="font-medium text-sm">{confluenceTarget.space_name}</div>
@@ -1154,7 +1223,7 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
                     {confluenceTarget ? 'Update Confluence Target' : 'Configure Confluence Target'}
                   </h3>
                   <p className="text-xs text-muted-foreground">
-                    Select the space and optional parent page from your Atlassian Cloud organization.
+                    Select the site, space, and optional parent page from your Atlassian Cloud organization.
                   </p>
                 </div>
                 {confluenceTarget && (
@@ -1169,6 +1238,60 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
               </div>
 
               <form onSubmit={handleSaveConfluence} className="space-y-5">
+                {/* Site Picker */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-semibold uppercase text-muted-foreground">
+                      Atlassian Site <span className="text-red-500">*</span>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={loadSites}
+                      disabled={loadingSites}
+                      className="text-xs text-primary hover:underline flex items-center gap-1 font-medium"
+                    >
+                      <RefreshCw className={`h-3 w-3 ${loadingSites ? 'animate-spin' : ''}`} /> Reload Sites
+                    </button>
+                  </div>
+
+                  {loadingSites ? (
+                    <div className="p-3 text-xs text-muted-foreground flex items-center gap-2 border rounded-lg">
+                      <RefreshCw className="h-3.5 w-3.5 animate-spin" /> Loading accessible Atlassian sites...
+                    </div>
+                  ) : confluenceSites.length > 0 ? (
+                    <select
+                      value={selectedCloudId}
+                      onChange={(e) => handleSiteChange(e.target.value)}
+                      required
+                      className="w-full px-3 py-2 rounded-lg border bg-background text-xs focus:outline-none focus:ring-1 focus:ring-primary"
+                    >
+                      <option value="">-- Select an Atlassian Site --</option>
+                      {confluenceSites.map((site) => (
+                        <option key={site.id} value={site.id}>
+                          {site.name} ({site.url})
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <div className="p-2.5 rounded-lg border bg-muted/40 text-[11px] text-muted-foreground flex items-center justify-between">
+                      <span>No Atlassian sites discovered. Connect your session to discover accessible sites.</span>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            const res = await api.atlassianSSOStart();
+                            if (res.authorization_url) window.location.href = res.authorization_url;
+                          } catch (err: any) {
+                            alert(err.message || 'Failed to start authorization');
+                          }
+                        }}
+                        className="text-primary hover:underline font-semibold text-[11px] flex items-center gap-1"
+                      >
+                        <RefreshCw className="h-3 w-3" /> Connect Session
+                      </button>
+                    </div>
+                  )}
+                </div>
                 {/* Space Picker */}
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
@@ -1187,7 +1310,7 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
                       )}
                       <button
                         type="button"
-                        onClick={loadSpaces}
+                        onClick={() => loadSpaces()}
                         disabled={loadingSpaces}
                         className="text-xs text-primary hover:underline flex items-center gap-1 font-medium"
                       >
@@ -1255,7 +1378,7 @@ export const ProjectDetailPage: React.FC<ProjectDetailPageProps> = ({ projectId,
                               </button>
                               <button
                                 type="button"
-                                onClick={loadSpaces}
+                                onClick={() => loadSpaces()}
                                 className="text-muted-foreground hover:underline font-medium text-[11px]"
                               >
                                 Reload

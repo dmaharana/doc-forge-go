@@ -22,6 +22,14 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+type AtlassianSite struct {
+	ID        string   `json:"id"`
+	URL       string   `json:"url"`
+	Name      string   `json:"name"`
+	Scopes    []string `json:"scopes,omitempty"`
+	AvatarURL string   `json:"avatar_url,omitempty"`
+}
+
 type AtlassianSpace struct {
 	ID   string `json:"id,omitempty"`
 	Key  string `json:"key"`
@@ -480,10 +488,10 @@ func (s *AtlassianService) getValidAccessToken(ctx context.Context, conn *models
 	return crypto.Decrypt(conn.AccessTokenEncrypted, s.cfg.EncryptionKey)
 }
 
-func (s *AtlassianService) fetchAccessibleResources(ctx context.Context, accessToken string) (string, string) {
+func (s *AtlassianService) fetchAccessibleSitesList(ctx context.Context, accessToken string) ([]AtlassianSite, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", "https://api.atlassian.com/oauth/token/accessible-resources", nil)
 	if err != nil {
-		return "", ""
+		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/json")
@@ -491,44 +499,130 @@ func (s *AtlassianService) fetchAccessibleResources(ctx context.Context, accessT
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", ""
+		return nil, err
 	}
 	defer resp.Body.Close()
 
-	var resources []struct {
-		ID     string   `json:"id"`
-		URL    string   `json:"url"`
-		Name   string   `json:"name"`
-		Scopes []string `json:"scopes"`
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("failed to fetch accessible resources (%d): %s", resp.StatusCode, string(b))
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&resources); err == nil && len(resources) > 0 {
-		for _, r := range resources {
-			for _, sc := range r.Scopes {
-				if strings.Contains(sc, "confluence") || strings.Contains(sc, "space") || strings.Contains(sc, "page") {
-					return r.ID, r.URL
-				}
+
+	var rawResources []struct {
+		ID        string   `json:"id"`
+		URL       string   `json:"url"`
+		Name      string   `json:"name"`
+		Scopes    []string `json:"scopes"`
+		AvatarURL string   `json:"avatarUrl"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rawResources); err != nil {
+		return nil, err
+	}
+
+	var sites []AtlassianSite
+	for _, r := range rawResources {
+		hasConfluence := len(r.Scopes) == 0
+		for _, sc := range r.Scopes {
+			if strings.Contains(sc, "confluence") || strings.Contains(sc, "space") || strings.Contains(sc, "page") {
+				hasConfluence = true
+				break
 			}
 		}
-		return resources[0].ID, resources[0].URL
+		if hasConfluence {
+			sites = append(sites, AtlassianSite{
+				ID:        r.ID,
+				URL:       r.URL,
+				Name:      r.Name,
+				Scopes:    r.Scopes,
+				AvatarURL: r.AvatarURL,
+			})
+		}
+	}
+	if len(sites) == 0 {
+		for _, r := range rawResources {
+			sites = append(sites, AtlassianSite{
+				ID:        r.ID,
+				URL:       r.URL,
+				Name:      r.Name,
+				Scopes:    r.Scopes,
+				AvatarURL: r.AvatarURL,
+			})
+		}
+	}
+
+	return sites, nil
+}
+
+func (s *AtlassianService) fetchAccessibleResources(ctx context.Context, accessToken string) (string, string) {
+	sites, err := s.fetchAccessibleSitesList(ctx, accessToken)
+	if err == nil && len(sites) > 0 {
+		return sites[0].ID, sites[0].URL
 	}
 	return "", ""
 }
 
-func (s *AtlassianService) ListSpaces(ctx context.Context, userID string) ([]AtlassianSpace, error) {
+func (s *AtlassianService) GetAccessibleSites(ctx context.Context, userID string) ([]AtlassianSite, error) {
+	if s.IsMockMode() {
+		return []AtlassianSite{
+			{
+				ID:   "mock-cloud-id-123",
+				Name: "Acme Engineering",
+				URL:  "https://mock-company.atlassian.net/wiki",
+			},
+			{
+				ID:   "mock-cloud-id-456",
+				Name: "Acme Operations",
+				URL:  "https://mock-ops.atlassian.net/wiki",
+			},
+		}, nil
+	}
+
+	if s.repo == nil {
+		return nil, fmt.Errorf("repository not initialized")
+	}
+
 	conn, err := s.repo.GetAtlassianConnectionByUserID(userID)
 	if err != nil || conn == nil {
-		if s.IsMockMode() {
-			return []AtlassianSpace{
-				{Key: "ENG", Name: "Engineering & Architecture", Type: "global"},
-				{Key: "PROD", Name: "Product Management", Type: "global"},
-				{Key: "OPS", Name: "Platform Operations", Type: "global"},
-				{Key: "DOCS", Name: "Technical Documentation", Type: "global"},
-			}, nil
-		}
 		return nil, fmt.Errorf("no atlassian connection found for user")
 	}
 
-	if s.IsMockMode() || conn.CloudID == "mock-cloud-id-123" {
+	if conn.CloudID == "mock-cloud-id-123" {
+		return []AtlassianSite{
+			{
+				ID:   "mock-cloud-id-123",
+				Name: "Acme Engineering",
+				URL:  "https://mock-company.atlassian.net/wiki",
+			},
+			{
+				ID:   "mock-cloud-id-456",
+				Name: "Acme Operations",
+				URL:  "https://mock-ops.atlassian.net/wiki",
+			},
+		}, nil
+	}
+
+	accessToken, err := s.getValidAccessToken(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.fetchAccessibleSitesList(ctx, accessToken)
+}
+
+func (s *AtlassianService) ListSpaces(ctx context.Context, userID string, cloudIDOpt ...string) ([]AtlassianSpace, error) {
+	cloudID := ""
+	if len(cloudIDOpt) > 0 && cloudIDOpt[0] != "" {
+		cloudID = cloudIDOpt[0]
+	}
+
+	if s.IsMockMode() {
+		if cloudID == "mock-cloud-id-456" {
+			return []AtlassianSpace{
+				{Key: "OPS", Name: "Platform Operations", Type: "global"},
+				{Key: "INFRA", Name: "Cloud Infrastructure", Type: "global"},
+				{Key: "SECOPS", Name: "Security Operations", Type: "global"},
+			}, nil
+		}
 		return []AtlassianSpace{
 			{Key: "ENG", Name: "Engineering & Architecture", Type: "global"},
 			{Key: "PROD", Name: "Product Management", Type: "global"},
@@ -537,8 +631,37 @@ func (s *AtlassianService) ListSpaces(ctx context.Context, userID string) ([]Atl
 		}, nil
 	}
 
-	if strings.TrimSpace(conn.CloudID) == "" {
-		return nil, fmt.Errorf("no Confluence Cloud site is linked to your Atlassian session. Please reconnect your Atlassian account with site access")
+	if s.repo == nil {
+		return nil, fmt.Errorf("repository not initialized")
+	}
+
+	conn, err := s.repo.GetAtlassianConnectionByUserID(userID)
+	if err != nil || conn == nil {
+		return nil, fmt.Errorf("no atlassian connection found for user")
+	}
+
+	if cloudID == "" {
+		cloudID = conn.CloudID
+	}
+
+	if s.IsMockMode() || cloudID == "mock-cloud-id-123" || cloudID == "mock-cloud-id-456" || conn.CloudID == "mock-cloud-id-123" {
+		if cloudID == "mock-cloud-id-456" {
+			return []AtlassianSpace{
+				{Key: "OPS", Name: "Platform Operations", Type: "global"},
+				{Key: "INFRA", Name: "Cloud Infrastructure", Type: "global"},
+				{Key: "SECOPS", Name: "Security Operations", Type: "global"},
+			}, nil
+		}
+		return []AtlassianSpace{
+			{Key: "ENG", Name: "Engineering & Architecture", Type: "global"},
+			{Key: "PROD", Name: "Product Management", Type: "global"},
+			{Key: "OPS", Name: "Platform Operations", Type: "global"},
+			{Key: "DOCS", Name: "Technical Documentation", Type: "global"},
+		}, nil
+	}
+
+	if strings.TrimSpace(cloudID) == "" {
+		return nil, fmt.Errorf("no Confluence Cloud site is selected or linked to your Atlassian session. Please reconnect your Atlassian account with site access")
 	}
 
 	accessToken, err := s.getValidAccessToken(ctx, conn)
@@ -549,7 +672,7 @@ func (s *AtlassianService) ListSpaces(ctx context.Context, userID string) ([]Atl
 	client := &http.Client{Timeout: 15 * time.Second}
 
 	// 1. Try Confluence REST API v1: GET /wiki/rest/api/space (works with read:confluence-space.summary)
-	v1URL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/rest/api/space?limit=100", conn.CloudID)
+	v1URL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/rest/api/space?limit=100", cloudID)
 	req1, err := http.NewRequestWithContext(ctx, "GET", v1URL, nil)
 	if err == nil {
 		req1.Header.Set("Authorization", "Bearer "+accessToken)
@@ -581,7 +704,7 @@ func (s *AtlassianService) ListSpaces(ctx context.Context, userID string) ([]Atl
 	}
 
 	// 2. Try Confluence REST API v2: GET /wiki/api/v2/spaces?limit=100 (requires read:space:confluence)
-	v2URL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/api/v2/spaces?limit=100", conn.CloudID)
+	v2URL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/api/v2/spaces?limit=100", cloudID)
 	req2, err := http.NewRequestWithContext(ctx, "GET", v2URL, nil)
 	if err == nil {
 		req2.Header.Set("Authorization", "Bearer "+accessToken)
@@ -615,7 +738,7 @@ func (s *AtlassianService) ListSpaces(ctx context.Context, userID string) ([]Atl
 	}
 
 	// 3. Fallback: discover spaces via CQL Search: GET /wiki/rest/api/search?cql=type=page (works with search:confluence)
-	sURL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/rest/api/search?cql=%s&limit=50", conn.CloudID, url.QueryEscape("type = page"))
+	sURL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/rest/api/search?cql=%s&limit=50", cloudID, url.QueryEscape("type = page"))
 	sReq, sErr := http.NewRequestWithContext(ctx, "GET", sURL, nil)
 	if sErr == nil {
 		sReq.Header.Set("Authorization", "Bearer "+accessToken)
@@ -665,8 +788,8 @@ func (s *AtlassianService) ListSpaces(ctx context.Context, userID string) ([]Atl
 	return []AtlassianSpace{}, nil
 }
 
-func (s *AtlassianService) CheckSpaceAccess(ctx context.Context, userID, spaceKey string) (bool, error) {
-	spaces, err := s.ListSpaces(ctx, userID)
+func (s *AtlassianService) CheckSpaceAccess(ctx context.Context, userID, spaceKey string, cloudIDOpt ...string) (bool, error) {
+	spaces, err := s.ListSpaces(ctx, userID, cloudIDOpt...)
 	if err == nil && len(spaces) > 0 {
 		for _, sp := range spaces {
 			if strings.EqualFold(sp.Key, spaceKey) {
@@ -681,8 +804,19 @@ func (s *AtlassianService) CheckSpaceAccess(ctx context.Context, userID, spaceKe
 	return true, nil
 }
 
-func (s *AtlassianService) ListSpacePages(ctx context.Context, userID, spaceKey string) ([]AtlassianPage, error) {
+func (s *AtlassianService) ListSpacePages(ctx context.Context, userID, spaceKey string, cloudIDOpt ...string) ([]AtlassianPage, error) {
+	cloudID := ""
+	if len(cloudIDOpt) > 0 && cloudIDOpt[0] != "" {
+		cloudID = cloudIDOpt[0]
+	}
+
 	if s.IsMockMode() {
+		if spaceKey == "INFRA" {
+			return []AtlassianPage{
+				{ID: "mock-page-infra-1", Title: "Kubernetes Clusters & Topology"},
+				{ID: "mock-page-infra-2", Title: "Network Architecture & VPCs"},
+			}, nil
+		}
 		return []AtlassianPage{
 			{ID: "mock-page-1", Title: "Architecture & Standards"},
 			{ID: "mock-page-2", Title: "Product Specifications"},
@@ -696,7 +830,17 @@ func (s *AtlassianService) ListSpacePages(ctx context.Context, userID, spaceKey 
 		return nil, fmt.Errorf("no atlassian connection found for user")
 	}
 
-	if conn.CloudID == "mock-cloud-id-123" {
+	if cloudID == "" {
+		cloudID = conn.CloudID
+	}
+
+	if cloudID == "mock-cloud-id-123" || cloudID == "mock-cloud-id-456" || conn.CloudID == "mock-cloud-id-123" {
+		if spaceKey == "INFRA" {
+			return []AtlassianPage{
+				{ID: "mock-page-infra-1", Title: "Kubernetes Clusters & Topology"},
+				{ID: "mock-page-infra-2", Title: "Network Architecture & VPCs"},
+			}, nil
+		}
 		return []AtlassianPage{
 			{ID: "mock-page-1", Title: "Architecture & Standards"},
 			{ID: "mock-page-2", Title: "Product Specifications"},
@@ -705,8 +849,8 @@ func (s *AtlassianService) ListSpacePages(ctx context.Context, userID, spaceKey 
 		}, nil
 	}
 
-	if strings.TrimSpace(conn.CloudID) == "" {
-		return nil, fmt.Errorf("no Confluence Cloud site is linked to your Atlassian session")
+	if strings.TrimSpace(cloudID) == "" {
+		return nil, fmt.Errorf("no Confluence Cloud site is selected or linked to your Atlassian session")
 	}
 
 	accessToken, err := s.getValidAccessToken(ctx, conn)
@@ -718,7 +862,7 @@ func (s *AtlassianService) ListSpacePages(ctx context.Context, userID, spaceKey 
 
 	// 1. Try CQL Content Search: GET /wiki/rest/api/content/search?cql=space = %q AND type = page (works with search:confluence)
 	cqlQuery := fmt.Sprintf(`space = %q AND type = page`, spaceKey)
-	cqlURL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/rest/api/content/search?cql=%s&limit=50", conn.CloudID, url.QueryEscape(cqlQuery))
+	cqlURL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/rest/api/content/search?cql=%s&limit=50", cloudID, url.QueryEscape(cqlQuery))
 	cReq, cErr := http.NewRequestWithContext(ctx, "GET", cqlURL, nil)
 	if cErr == nil {
 		cReq.Header.Set("Authorization", "Bearer "+accessToken)
@@ -745,7 +889,7 @@ func (s *AtlassianService) ListSpacePages(ctx context.Context, userID, spaceKey 
 	}
 
 	// 2. Try v1 API: GET /wiki/rest/api/content?spaceKey=...&type=page (works with read:confluence-content.all)
-	v1URL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/rest/api/content?spaceKey=%s&type=page&limit=50", conn.CloudID, url.QueryEscape(spaceKey))
+	v1URL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/rest/api/content?spaceKey=%s&type=page&limit=50", cloudID, url.QueryEscape(spaceKey))
 	fReq, fErr := http.NewRequestWithContext(ctx, "GET", v1URL, nil)
 	if fErr == nil {
 		fReq.Header.Set("Authorization", "Bearer "+accessToken)
@@ -775,7 +919,7 @@ func (s *AtlassianService) ListSpacePages(ctx context.Context, userID, spaceKey 
 	// 2. Try v2 API: GET /wiki/api/v2/spaces/{id}/pages (requires read:page:confluence)
 	// Resolve space ID first
 	spaceID := spaceKey
-	sReq, sErr := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/api/v2/spaces?keys=%s", conn.CloudID, url.QueryEscape(spaceKey)), nil)
+	sReq, sErr := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/api/v2/spaces?keys=%s", cloudID, url.QueryEscape(spaceKey)), nil)
 	if sErr == nil {
 		sReq.Header.Set("Authorization", "Bearer "+accessToken)
 		sReq.Header.Set("Accept", "application/json")
@@ -794,7 +938,7 @@ func (s *AtlassianService) ListSpacePages(ctx context.Context, userID, spaceKey 
 		}
 	}
 
-	pagesURL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/api/v2/spaces/%s/pages?limit=50", conn.CloudID, url.PathEscape(spaceID))
+	pagesURL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/api/v2/spaces/%s/pages?limit=50", cloudID, url.PathEscape(spaceID))
 	pReq, err := http.NewRequestWithContext(ctx, "GET", pagesURL, nil)
 	if err == nil {
 		pReq.Header.Set("Authorization", "Bearer "+accessToken)
@@ -823,28 +967,32 @@ func (s *AtlassianService) ListSpacePages(ctx context.Context, userID, spaceKey 
 	return []AtlassianPage{}, nil
 }
 
-func (s *AtlassianService) PublishDocument(ctx context.Context, userID, projectID, documentID, overrideSpaceKey, overrideParentPageID string) (string, error) {
+func (s *AtlassianService) PublishDocument(ctx context.Context, userID, projectID, documentID, overrideSpaceKey, overrideParentPageID string, cloudIDOpt ...string) (string, error) {
 	doc, err := s.repo.GetDocumentByID(documentID)
 	if err != nil {
 		return "", fmt.Errorf("document not found: %w", err)
 	}
 
+	cloudID := ""
+	if len(cloudIDOpt) > 0 && cloudIDOpt[0] != "" {
+		cloudID = cloudIDOpt[0]
+	}
+
+	target, _ := s.repo.GetConfluenceTargetByProject(projectID)
+
 	spaceKey := overrideSpaceKey
 	parentPageID := overrideParentPageID
 
 	if spaceKey == "" {
-		target, err := s.repo.GetConfluenceTargetByProject(projectID)
-		if err != nil || target == nil {
+		if target == nil {
 			return "", fmt.Errorf("no confluence target configured for project")
 		}
 		spaceKey = target.SpaceKey
 		parentPageID = target.ParentPageID
 	}
 
-	// Verify that user has access to this space
-	hasAccess, err := s.CheckSpaceAccess(ctx, userID, spaceKey)
-	if err == nil && !hasAccess {
-		return "", fmt.Errorf("access denied: user does not have permission to publish to Confluence space '%s'", spaceKey)
+	if cloudID == "" && target != nil && target.CloudID != "" {
+		cloudID = target.CloudID
 	}
 
 	conn, err := s.repo.GetAtlassianConnectionByUserID(userID)
@@ -854,13 +1002,23 @@ func (s *AtlassianService) PublishDocument(ctx context.Context, userID, projectI
 		}
 	}
 
-	if s.IsMockMode() || (conn != nil && conn.CloudID == "mock-cloud-id-123") {
+	if cloudID == "" && conn != nil {
+		cloudID = conn.CloudID
+	}
+
+	// Verify that user has access to this space
+	hasAccess, err := s.CheckSpaceAccess(ctx, userID, spaceKey, cloudID)
+	if err == nil && !hasAccess {
+		return "", fmt.Errorf("access denied: user does not have permission to publish to Confluence space '%s'", spaceKey)
+	}
+
+	if s.IsMockMode() || cloudID == "mock-cloud-id-123" || cloudID == "mock-cloud-id-456" || (conn != nil && conn.CloudID == "mock-cloud-id-123") {
 		pageID := fmt.Sprintf("conf_%d", time.Now().Unix())
 		_ = s.repo.UpdateDocumentConfluencePage(documentID, pageID)
 		return pageID, nil
 	}
 
-	if strings.TrimSpace(conn.CloudID) == "" {
+	if strings.TrimSpace(cloudID) == "" {
 		return "", fmt.Errorf("no Confluence Cloud site is linked to your Atlassian session")
 	}
 
@@ -880,7 +1038,7 @@ func (s *AtlassianService) PublishDocument(ctx context.Context, userID, projectI
 	// 1. Try Confluence REST API v2: POST /wiki/api/v2/pages (Standard modern Cloud API)
 	// First resolve numeric spaceId
 	spaceID := spaceKey
-	sReq, sErr := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/api/v2/spaces?keys=%s", conn.CloudID, url.QueryEscape(spaceKey)), nil)
+	sReq, sErr := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/api/v2/spaces?keys=%s", cloudID, url.QueryEscape(spaceKey)), nil)
 	if sErr == nil {
 		sReq.Header.Set("Authorization", "Bearer "+accessToken)
 		sReq.Header.Set("Accept", "application/json")
@@ -902,7 +1060,7 @@ func (s *AtlassianService) PublishDocument(ctx context.Context, userID, projectI
 	if spaceID == spaceKey {
 		// Resolve numeric space ID via CQL search (works with search:confluence)
 		cqlQ := fmt.Sprintf(`space = %q AND type = page`, spaceKey)
-		cqlSearchURL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/rest/api/content/search?cql=%s&expand=space&limit=1", conn.CloudID, url.QueryEscape(cqlQ))
+		cqlSearchURL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/rest/api/content/search?cql=%s&expand=space&limit=1", cloudID, url.QueryEscape(cqlQ))
 		if csReq, csErr := http.NewRequestWithContext(ctx, "GET", cqlSearchURL, nil); csErr == nil {
 			csReq.Header.Set("Authorization", "Bearer "+accessToken)
 			csReq.Header.Set("Accept", "application/json")
@@ -926,7 +1084,7 @@ func (s *AtlassianService) PublishDocument(ctx context.Context, userID, projectI
 
 	if spaceID == spaceKey {
 		// Resolve numeric space ID via v1 space endpoint (works with read:confluence-space.summary)
-		v1sURL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/rest/api/space/%s", conn.CloudID, url.PathEscape(spaceKey))
+		v1sURL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/rest/api/space/%s", cloudID, url.PathEscape(spaceKey))
 		if sReq1, sErr1 := http.NewRequestWithContext(ctx, "GET", v1sURL, nil); sErr1 == nil {
 			sReq1.Header.Set("Authorization", "Bearer "+accessToken)
 			sReq1.Header.Set("Accept", "application/json")
@@ -947,7 +1105,7 @@ func (s *AtlassianService) PublishDocument(ctx context.Context, userID, projectI
 	// If spaceID is still unresolved, try resolving via parentPageID
 	if spaceID == spaceKey && parentPageID != "" {
 		// Try v2 page lookup
-		pURL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/api/v2/pages/%s", conn.CloudID, url.PathEscape(parentPageID))
+		pURL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/api/v2/pages/%s", cloudID, url.PathEscape(parentPageID))
 		if cpReq, cpErr := http.NewRequestWithContext(ctx, "GET", pURL, nil); cpErr == nil {
 			cpReq.Header.Set("Authorization", "Bearer "+accessToken)
 			cpReq.Header.Set("Accept", "application/json")
@@ -965,7 +1123,7 @@ func (s *AtlassianService) PublishDocument(ctx context.Context, userID, projectI
 		}
 		// Fallback: Try content search expand=space
 		if spaceID == spaceKey {
-			cURL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/rest/api/content/%s?expand=space", conn.CloudID, url.PathEscape(parentPageID))
+			cURL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/rest/api/content/%s?expand=space", cloudID, url.PathEscape(parentPageID))
 			if cpReq, cpErr := http.NewRequestWithContext(ctx, "GET", cURL, nil); cpErr == nil {
 				cpReq.Header.Set("Authorization", "Bearer "+accessToken)
 				cpReq.Header.Set("Accept", "application/json")
@@ -1004,7 +1162,7 @@ func (s *AtlassianService) PublishDocument(ctx context.Context, userID, projectI
 		}
 
 		v2Bytes, _ := json.Marshal(v2Payload)
-		v2URL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/api/v2/pages", conn.CloudID)
+		v2URL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/api/v2/pages", cloudID)
 		if req2, reqErr2 := http.NewRequestWithContext(ctx, "POST", v2URL, bytes.NewReader(v2Bytes)); reqErr2 == nil {
 			req2.Header.Set("Authorization", "Bearer "+accessToken)
 			req2.Header.Set("Content-Type", "application/json")
@@ -1045,7 +1203,7 @@ func (s *AtlassianService) PublishDocument(ctx context.Context, userID, projectI
 		v1Payload["ancestors"] = []map[string]string{{"id": parentPageID}}
 	}
 	v1Bytes, _ := json.Marshal(v1Payload)
-	v1URL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/rest/api/content", conn.CloudID)
+	v1URL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/rest/api/content", cloudID)
 	if req1, reqErr1 := http.NewRequestWithContext(ctx, "POST", v1URL, bytes.NewReader(v1Bytes)); reqErr1 == nil {
 		req1.Header.Set("Authorization", "Bearer "+accessToken)
 		req1.Header.Set("Content-Type", "application/json")

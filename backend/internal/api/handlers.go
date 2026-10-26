@@ -987,7 +987,8 @@ func (h *Handlers) AtlassianCallback(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) AtlassianListSpaces(w http.ResponseWriter, r *http.Request) {
 	user := GetCurrentUser(r)
-	spaces, err := h.atlassian.ListSpaces(r.Context(), user.ID)
+	cloudID := r.URL.Query().Get("cloud_id")
+	spaces, err := h.atlassian.ListSpaces(r.Context(), user.ID, cloudID)
 	if err != nil {
 		respondJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -995,7 +996,20 @@ func (h *Handlers) AtlassianListSpaces(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, spaces)
 }
 
+func (h *Handlers) AtlassianListSites(w http.ResponseWriter, r *http.Request) {
+	user := GetCurrentUser(r)
+	sites, err := h.atlassian.GetAccessibleSites(r.Context(), user.ID)
+	if err != nil {
+		respondJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	respondJSON(w, http.StatusOK, sites)
+}
+
 type SetConfluenceTargetRequest struct {
+	CloudID         string `json:"cloud_id,omitempty"`
+	SiteURL         string `json:"site_url,omitempty"`
+	SiteName        string `json:"site_name,omitempty"`
 	SpaceKey        string `json:"space_key"`
 	SpaceName       string `json:"space_name"`
 	ParentPageID    string `json:"parent_page_id,omitempty"`
@@ -1022,8 +1036,8 @@ func (h *Handlers) SetProjectConfluenceTarget(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Verify that user has access to space
-	hasAccess, err := h.atlassian.CheckSpaceAccess(r.Context(), user.ID, req.SpaceKey)
+	// Verify that user has access to space for the specified site
+	hasAccess, err := h.atlassian.CheckSpaceAccess(r.Context(), user.ID, req.SpaceKey, req.CloudID)
 	if err == nil && !hasAccess && !h.atlassian.IsMockMode() {
 		respondJSON(w, http.StatusForbidden, map[string]string{
 			"error": fmt.Sprintf("You do not have access to Confluence space '%s'", req.SpaceKey),
@@ -1037,9 +1051,20 @@ func (h *Handlers) SetProjectConfluenceTarget(w http.ResponseWriter, r *http.Req
 		connID = conn.ID
 	}
 
+	cloudID := req.CloudID
+	siteURL := req.SiteURL
+	siteName := req.SiteName
+	if cloudID == "" && conn != nil {
+		cloudID = conn.CloudID
+		siteURL = conn.SiteURL
+	}
+
 	target := &models.ConfluenceTarget{
 		ProjectID:       projectID,
 		ConnectionID:    connID,
+		CloudID:         cloudID,
+		SiteURL:         siteURL,
+		SiteName:        siteName,
 		SpaceKey:        req.SpaceKey,
 		SpaceName:       req.SpaceName,
 		ParentPageID:    req.ParentPageID,
@@ -1092,6 +1117,24 @@ func (h *Handlers) DeleteProjectConfluenceTarget(w http.ResponseWriter, r *http.
 	respondJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
 }
 
+func (h *Handlers) ListProjectConfluenceSites(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "id")
+	user := GetCurrentUser(r)
+
+	isMember, _, _ := h.repo.IsProjectMemberOrOwner(projectID, user.ID)
+	if user.Role != models.RoleAdmin && !isMember {
+		respondJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: you are not a member of this project"})
+		return
+	}
+
+	sites, err := h.atlassian.GetAccessibleSites(r.Context(), user.ID)
+	if err != nil {
+		respondJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	respondJSON(w, http.StatusOK, sites)
+}
+
 func (h *Handlers) ListProjectConfluenceSpaces(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "id")
 	user := GetCurrentUser(r)
@@ -1102,7 +1145,15 @@ func (h *Handlers) ListProjectConfluenceSpaces(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	spaces, err := h.atlassian.ListSpaces(r.Context(), user.ID)
+	cloudID := r.URL.Query().Get("cloud_id")
+	if cloudID == "" {
+		target, _ := h.repo.GetConfluenceTargetByProject(projectID)
+		if target != nil && target.CloudID != "" {
+			cloudID = target.CloudID
+		}
+	}
+
+	spaces, err := h.atlassian.ListSpaces(r.Context(), user.ID, cloudID)
 	if err != nil {
 		respondJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -1120,6 +1171,14 @@ func (h *Handlers) ListProjectConfluencePages(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	cloudID := r.URL.Query().Get("cloud_id")
+	if cloudID == "" {
+		target, _ := h.repo.GetConfluenceTargetByProject(projectID)
+		if target != nil && target.CloudID != "" {
+			cloudID = target.CloudID
+		}
+	}
+
 	spaceKey := r.URL.Query().Get("space_key")
 	if spaceKey == "" {
 		target, _ := h.repo.GetConfluenceTargetByProject(projectID)
@@ -1132,7 +1191,7 @@ func (h *Handlers) ListProjectConfluencePages(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	pages, err := h.atlassian.ListSpacePages(r.Context(), user.ID, spaceKey)
+	pages, err := h.atlassian.ListSpacePages(r.Context(), user.ID, spaceKey, cloudID)
 	if err != nil {
 		respondJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -1141,6 +1200,9 @@ func (h *Handlers) ListProjectConfluencePages(w http.ResponseWriter, r *http.Req
 }
 
 type ExportDocumentConfluenceRequest struct {
+	OverrideCloudID      string `json:"override_cloud_id,omitempty"`
+	OverrideSiteURL      string `json:"override_site_url,omitempty"`
+	OverrideSiteName     string `json:"override_site_name,omitempty"`
 	OverrideSpaceKey     string `json:"override_space_key,omitempty"`
 	OverrideSpaceName    string `json:"override_space_name,omitempty"`
 	OverrideParentPageID string `json:"override_parent_page_id,omitempty"`
@@ -1168,10 +1230,12 @@ func (h *Handlers) ExportDocumentToConfluence(w http.ResponseWriter, r *http.Req
 
 	spaceKey := req.OverrideSpaceKey
 	parentPageID := req.OverrideParentPageID
+	cloudID := req.OverrideCloudID
+
+	target, _ := h.repo.GetConfluenceTargetByProject(doc.ProjectID)
 
 	if spaceKey == "" {
-		target, err := h.repo.GetConfluenceTargetByProject(doc.ProjectID)
-		if err != nil || target == nil {
+		if target == nil {
 			respondJSON(w, http.StatusBadRequest, map[string]any{
 				"error":        "No Confluence target configured for this project. Please configure a target space.",
 				"needs_target": true,
@@ -1182,10 +1246,14 @@ func (h *Handlers) ExportDocumentToConfluence(w http.ResponseWriter, r *http.Req
 		parentPageID = target.ParentPageID
 	}
 
+	if cloudID == "" && target != nil && target.CloudID != "" {
+		cloudID = target.CloudID
+	}
+
 	// Verify that exporting user has access to space
-	hasAccess, err := h.atlassian.CheckSpaceAccess(r.Context(), user.ID, spaceKey)
+	hasAccess, err := h.atlassian.CheckSpaceAccess(r.Context(), user.ID, spaceKey, cloudID)
 	if err == nil && !hasAccess {
-		accessibleSpaces, _ := h.atlassian.ListSpaces(r.Context(), user.ID)
+		accessibleSpaces, _ := h.atlassian.ListSpaces(r.Context(), user.ID, cloudID)
 		respondJSON(w, http.StatusForbidden, map[string]any{
 			"error":                   fmt.Sprintf("You do not have access to Confluence space '%s'.", spaceKey),
 			"code":                    "SPACE_ACCESS_DENIED",
@@ -1196,7 +1264,7 @@ func (h *Handlers) ExportDocumentToConfluence(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	pageID, err := h.atlassian.PublishDocument(r.Context(), user.ID, doc.ProjectID, docID, spaceKey, parentPageID)
+	pageID, err := h.atlassian.PublishDocument(r.Context(), user.ID, doc.ProjectID, docID, spaceKey, parentPageID, cloudID)
 	if err != nil {
 		respondJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -1204,13 +1272,22 @@ func (h *Handlers) ExportDocumentToConfluence(w http.ResponseWriter, r *http.Req
 
 	// If owner requested to update project default
 	if req.SetAsProjectDefault && req.OverrideSpaceKey != "" && (user.Role == models.RoleAdmin || role == models.ProjectMemberRoleOwner) {
+		siteURL := req.OverrideSiteURL
+		siteName := req.OverrideSiteName
+		if siteURL == "" && target != nil {
+			siteURL = target.SiteURL
+			siteName = target.SiteName
+		}
 		_ = h.repo.UpsertConfluenceTarget(&models.ConfluenceTarget{
-			ProjectID:    doc.ProjectID,
-			SpaceKey:     req.OverrideSpaceKey,
-			SpaceName:    req.OverrideSpaceName,
-			ParentPageID: req.OverrideParentPageID,
-			UpdatedBy:    &user.ID,
-			IsDefault:    true,
+			ProjectID:       doc.ProjectID,
+			CloudID:         cloudID,
+			SiteURL:         siteURL,
+			SiteName:        siteName,
+			SpaceKey:        req.OverrideSpaceKey,
+			SpaceName:       req.OverrideSpaceName,
+			ParentPageID:    req.OverrideParentPageID,
+			UpdatedBy:       &user.ID,
+			IsDefault:       true,
 		})
 	}
 
