@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -673,115 +674,227 @@ func (s *AtlassianService) ListSpaces(ctx context.Context, userID string, cloudI
 
 	// 1. Try Confluence REST API v1: GET /wiki/rest/api/space (works with read:confluence-space.summary)
 	v1URL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/rest/api/space?limit=100", cloudID)
-	req1, err := http.NewRequestWithContext(ctx, "GET", v1URL, nil)
-	if err == nil {
+	var v1Spaces []AtlassianSpace
+	v1Seen := make(map[string]bool)
+	nextV1 := v1URL
+	prevV1 := ""
+	v1Pages := 0
+	for nextV1 != "" && v1Pages < 25 && len(v1Spaces) < 2500 {
+		if nextV1 == prevV1 {
+			break
+		}
+		prevV1 = nextV1
+		v1Pages++
+
+		req1, err := http.NewRequestWithContext(ctx, "GET", nextV1, nil)
+		if err != nil {
+			break
+		}
 		req1.Header.Set("Authorization", "Bearer "+accessToken)
 		req1.Header.Set("Accept", "application/json")
 		resp1, err1 := client.Do(req1)
-		if err1 == nil {
-			defer resp1.Body.Close()
-			if resp1.StatusCode == http.StatusOK {
-				var data1 struct {
-					Results []struct {
-						Key  string `json:"key"`
-						Name string `json:"name"`
-						Type string `json:"type"`
-					} `json:"results"`
-				}
-				if json.NewDecoder(resp1.Body).Decode(&data1) == nil {
-					spaces := make([]AtlassianSpace, 0, len(data1.Results))
-					for _, r := range data1.Results {
-						spaces = append(spaces, AtlassianSpace{Key: r.Key, Name: r.Name, Type: r.Type})
-					}
-					return spaces, nil
-				}
-			} else if resp1.StatusCode == http.StatusUnauthorized {
-				// Missing scope: fall through to v2 attempt
-			} else if resp1.StatusCode == http.StatusGone {
-				// v1 deprecated - fall through to v2
+		if err1 != nil {
+			break
+		}
+		if resp1.StatusCode != http.StatusOK {
+			resp1.Body.Close()
+			break
+		}
+		var data1 struct {
+			Results []struct {
+				ID   json.Number `json:"id"`
+				Key  string      `json:"key"`
+				Name string      `json:"name"`
+				Type string      `json:"type"`
+			} `json:"results"`
+			Links struct {
+				Next string `json:"next"`
+			} `json:"_links"`
+		}
+		decErr := json.NewDecoder(resp1.Body).Decode(&data1)
+		resp1.Body.Close()
+		if decErr != nil {
+			break
+		}
+		for _, r := range data1.Results {
+			k := strings.TrimSpace(r.Key)
+			if k != "" && !v1Seen[k] {
+				v1Seen[k] = true
+				v1Spaces = append(v1Spaces, AtlassianSpace{
+					ID:   r.ID.String(),
+					Key:  k,
+					Name: r.Name,
+					Type: r.Type,
+				})
 			}
 		}
+		if data1.Links.Next != "" {
+			nextV1 = resolveConfluenceURL(cloudID, data1.Links.Next)
+		} else {
+			nextV1 = ""
+		}
+	}
+	if len(v1Spaces) > 0 {
+		sort.Slice(v1Spaces, func(i, j int) bool {
+			ni, nj := strings.ToLower(v1Spaces[i].Name), strings.ToLower(v1Spaces[j].Name)
+			if ni != nj {
+				return ni < nj
+			}
+			return v1Spaces[i].Key < v1Spaces[j].Key
+		})
+		return v1Spaces, nil
 	}
 
-	// 2. Try Confluence REST API v2: GET /wiki/api/v2/spaces?limit=100 (requires read:space:confluence)
-	v2URL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/api/v2/spaces?limit=100", cloudID)
-	req2, err := http.NewRequestWithContext(ctx, "GET", v2URL, nil)
-	if err == nil {
+	// 2. Try Confluence REST API v2: GET /wiki/api/v2/spaces?limit=250 (requires read:space:confluence)
+	v2URL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/api/v2/spaces?limit=250", cloudID)
+	var v2Spaces []AtlassianSpace
+	v2Seen := make(map[string]bool)
+	nextV2 := v2URL
+	prevV2 := ""
+	v2Pages := 0
+	for nextV2 != "" && v2Pages < 25 && len(v2Spaces) < 2500 {
+		if nextV2 == prevV2 {
+			break
+		}
+		prevV2 = nextV2
+		v2Pages++
+
+		req2, err := http.NewRequestWithContext(ctx, "GET", nextV2, nil)
+		if err != nil {
+			break
+		}
 		req2.Header.Set("Authorization", "Bearer "+accessToken)
 		req2.Header.Set("Accept", "application/json")
 		resp2, err2 := client.Do(req2)
-		if err2 == nil {
-			defer resp2.Body.Close()
-			if resp2.StatusCode == http.StatusOK {
-				var data2 struct {
-					Results []struct {
-						ID   string `json:"id"`
-						Key  string `json:"key"`
-						Name string `json:"name"`
-						Type string `json:"type"`
-					} `json:"results"`
-				}
-				if json.NewDecoder(resp2.Body).Decode(&data2) == nil {
-					spaces := make([]AtlassianSpace, 0, len(data2.Results))
-					for _, r := range data2.Results {
-						spaces = append(spaces, AtlassianSpace{
-							ID:   r.ID,
-							Key:  r.Key,
-							Name: r.Name,
-							Type: r.Type,
-						})
-					}
-					return spaces, nil
-				}
+		if err2 != nil {
+			break
+		}
+		if resp2.StatusCode != http.StatusOK {
+			resp2.Body.Close()
+			break
+		}
+		var data2 struct {
+			Results []struct {
+				ID   string `json:"id"`
+				Key  string `json:"key"`
+				Name string `json:"name"`
+				Type string `json:"type"`
+			} `json:"results"`
+			Links struct {
+				Next string `json:"next"`
+			} `json:"_links"`
+		}
+		decErr := json.NewDecoder(resp2.Body).Decode(&data2)
+		resp2.Body.Close()
+		if decErr != nil {
+			break
+		}
+		for _, r := range data2.Results {
+			k := strings.TrimSpace(r.Key)
+			if k != "" && !v2Seen[k] {
+				v2Seen[k] = true
+				v2Spaces = append(v2Spaces, AtlassianSpace{
+					ID:   r.ID,
+					Key:  k,
+					Name: r.Name,
+					Type: r.Type,
+				})
 			}
 		}
+		if data2.Links.Next != "" {
+			nextV2 = resolveConfluenceURL(cloudID, data2.Links.Next)
+		} else {
+			nextV2 = ""
+		}
+	}
+	if len(v2Spaces) > 0 {
+		sort.Slice(v2Spaces, func(i, j int) bool {
+			ni, nj := strings.ToLower(v2Spaces[i].Name), strings.ToLower(v2Spaces[j].Name)
+			if ni != nj {
+				return ni < nj
+			}
+			return v2Spaces[i].Key < v2Spaces[j].Key
+		})
+		return v2Spaces, nil
 	}
 
 	// 3. Fallback: discover spaces via CQL Search: GET /wiki/rest/api/search?cql=type=page (works with search:confluence)
-	sURL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/rest/api/search?cql=%s&limit=50", cloudID, url.QueryEscape("type = page"))
-	sReq, sErr := http.NewRequestWithContext(ctx, "GET", sURL, nil)
-	if sErr == nil {
+	sURL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/rest/api/search?cql=%s&limit=100", cloudID, url.QueryEscape("type = page"))
+	var cqlSpaces []AtlassianSpace
+	cqlSeen := make(map[string]bool)
+	nextCQL := sURL
+	prevCQL := ""
+	cqlPages := 0
+	for nextCQL != "" && cqlPages < 10 && len(cqlSpaces) < 1000 {
+		if nextCQL == prevCQL {
+			break
+		}
+		prevCQL = nextCQL
+		cqlPages++
+
+		sReq, sErr := http.NewRequestWithContext(ctx, "GET", nextCQL, nil)
+		if sErr != nil {
+			break
+		}
 		sReq.Header.Set("Authorization", "Bearer "+accessToken)
 		sReq.Header.Set("Accept", "application/json")
 		sResp, sDoErr := client.Do(sReq)
-		if sDoErr == nil {
-			defer sResp.Body.Close()
-			if sResp.StatusCode == http.StatusOK {
-				var sData struct {
-					Results []struct {
-						ResultGlobalContainer struct {
-							Title      string `json:"title"`
-							DisplayURL string `json:"displayUrl"`
-						} `json:"resultGlobalContainer"`
-					} `json:"results"`
-				}
-				if json.NewDecoder(sResp.Body).Decode(&sData) == nil && len(sData.Results) > 0 {
-					seen := make(map[string]bool)
-					spaces := make([]AtlassianSpace, 0)
-					for _, r := range sData.Results {
-						disp := r.ResultGlobalContainer.DisplayURL
-						if strings.HasPrefix(disp, "/spaces/") {
-							key := strings.TrimPrefix(disp, "/spaces/")
-							if !seen[key] && !strings.HasPrefix(key, "~") && key != "" {
-								seen[key] = true
-								name := r.ResultGlobalContainer.Title
-								if name == "" {
-									name = key
-								}
-								spaces = append(spaces, AtlassianSpace{
-									Key:  key,
-									Name: name,
-									Type: "global",
-								})
-							}
-						}
+		if sDoErr != nil {
+			break
+		}
+		if sResp.StatusCode != http.StatusOK {
+			sResp.Body.Close()
+			break
+		}
+		var sData struct {
+			Results []struct {
+				ResultGlobalContainer struct {
+					Title      string `json:"title"`
+					DisplayURL string `json:"displayUrl"`
+				} `json:"resultGlobalContainer"`
+			} `json:"results"`
+			Links struct {
+				Next string `json:"next"`
+			} `json:"_links"`
+		}
+		decErr := json.NewDecoder(sResp.Body).Decode(&sData)
+		sResp.Body.Close()
+		if decErr != nil {
+			break
+		}
+		for _, r := range sData.Results {
+			disp := r.ResultGlobalContainer.DisplayURL
+			if strings.HasPrefix(disp, "/spaces/") {
+				key := strings.TrimPrefix(disp, "/spaces/")
+				if !cqlSeen[key] && !strings.HasPrefix(key, "~") && key != "" {
+					cqlSeen[key] = true
+					name := r.ResultGlobalContainer.Title
+					if name == "" {
+						name = key
 					}
-					if len(spaces) > 0 {
-						return spaces, nil
-					}
+					cqlSpaces = append(cqlSpaces, AtlassianSpace{
+						Key:  key,
+						Name: name,
+						Type: "global",
+					})
 				}
 			}
 		}
+		if sData.Links.Next != "" {
+			nextCQL = resolveConfluenceURL(cloudID, sData.Links.Next)
+		} else {
+			nextCQL = ""
+		}
+	}
+	if len(cqlSpaces) > 0 {
+		sort.Slice(cqlSpaces, func(i, j int) bool {
+			ni, nj := strings.ToLower(cqlSpaces[i].Name), strings.ToLower(cqlSpaces[j].Name)
+			if ni != nj {
+				return ni < nj
+			}
+			return cqlSpaces[i].Key < cqlSpaces[j].Key
+		})
+		return cqlSpaces, nil
 	}
 
 	// APIs failed / returned 401 - return empty gracefully so manual space key input activates
@@ -862,61 +975,136 @@ func (s *AtlassianService) ListSpacePages(ctx context.Context, userID, spaceKey 
 
 	// 1. Try CQL Content Search: GET /wiki/rest/api/content/search?cql=space = %q AND type = page (works with search:confluence)
 	cqlQuery := fmt.Sprintf(`space = %q AND type = page`, spaceKey)
-	cqlURL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/rest/api/content/search?cql=%s&limit=50", cloudID, url.QueryEscape(cqlQuery))
-	cReq, cErr := http.NewRequestWithContext(ctx, "GET", cqlURL, nil)
-	if cErr == nil {
+	cqlURL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/rest/api/content/search?cql=%s&limit=100", cloudID, url.QueryEscape(cqlQuery))
+	var cqlPages []AtlassianPage
+	cqlSeen := make(map[string]bool)
+	nextCQL := cqlURL
+	prevCQL := ""
+	cqlCount := 0
+	for nextCQL != "" && cqlCount < 10 && len(cqlPages) < 1000 {
+		if nextCQL == prevCQL {
+			break
+		}
+		prevCQL = nextCQL
+		cqlCount++
+
+		cReq, cErr := http.NewRequestWithContext(ctx, "GET", nextCQL, nil)
+		if cErr != nil {
+			break
+		}
 		cReq.Header.Set("Authorization", "Bearer "+accessToken)
 		cReq.Header.Set("Accept", "application/json")
 		cResp, cDoErr := client.Do(cReq)
-		if cDoErr == nil {
-			defer cResp.Body.Close()
-			if cResp.StatusCode == http.StatusOK {
-				var data struct {
-					Results []struct {
-						ID    string `json:"id"`
-						Title string `json:"title"`
-					} `json:"results"`
-				}
-				if json.NewDecoder(cResp.Body).Decode(&data) == nil && len(data.Results) > 0 {
-					pages := make([]AtlassianPage, 0, len(data.Results))
-					for _, p := range data.Results {
-						pages = append(pages, AtlassianPage{ID: p.ID, Title: p.Title})
-					}
-					return pages, nil
-				}
+		if cDoErr != nil {
+			break
+		}
+		if cResp.StatusCode != http.StatusOK {
+			cResp.Body.Close()
+			break
+		}
+		var data struct {
+			Results []struct {
+				ID    string `json:"id"`
+				Title string `json:"title"`
+			} `json:"results"`
+			Links struct {
+				Next string `json:"next"`
+			} `json:"_links"`
+		}
+		decErr := json.NewDecoder(cResp.Body).Decode(&data)
+		cResp.Body.Close()
+		if decErr != nil {
+			break
+		}
+		for _, p := range data.Results {
+			if p.ID != "" && !cqlSeen[p.ID] {
+				cqlSeen[p.ID] = true
+				cqlPages = append(cqlPages, AtlassianPage{ID: p.ID, Title: p.Title})
 			}
 		}
+		if data.Links.Next != "" {
+			nextCQL = resolveConfluenceURL(cloudID, data.Links.Next)
+		} else {
+			nextCQL = ""
+		}
+	}
+	if len(cqlPages) > 0 {
+		sort.Slice(cqlPages, func(i, j int) bool {
+			ti, tj := strings.ToLower(cqlPages[i].Title), strings.ToLower(cqlPages[j].Title)
+			if ti != tj {
+				return ti < tj
+			}
+			return cqlPages[i].ID < cqlPages[j].ID
+		})
+		return cqlPages, nil
 	}
 
 	// 2. Try v1 API: GET /wiki/rest/api/content?spaceKey=...&type=page (works with read:confluence-content.all)
-	v1URL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/rest/api/content?spaceKey=%s&type=page&limit=50", cloudID, url.QueryEscape(spaceKey))
-	fReq, fErr := http.NewRequestWithContext(ctx, "GET", v1URL, nil)
-	if fErr == nil {
+	v1URL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/rest/api/content?spaceKey=%s&type=page&limit=100", cloudID, url.QueryEscape(spaceKey))
+	var v1Pages []AtlassianPage
+	v1Seen := make(map[string]bool)
+	nextV1 := v1URL
+	prevV1 := ""
+	v1Count := 0
+	for nextV1 != "" && v1Count < 10 && len(v1Pages) < 1000 {
+		if nextV1 == prevV1 {
+			break
+		}
+		prevV1 = nextV1
+		v1Count++
+
+		fReq, fErr := http.NewRequestWithContext(ctx, "GET", nextV1, nil)
+		if fErr != nil {
+			break
+		}
 		fReq.Header.Set("Authorization", "Bearer "+accessToken)
 		fReq.Header.Set("Accept", "application/json")
 		fResp, fDoErr := client.Do(fReq)
-		if fDoErr == nil {
-			defer fResp.Body.Close()
-			if fResp.StatusCode == http.StatusOK {
-				var data struct {
-					Results []struct {
-						ID    string `json:"id"`
-						Title string `json:"title"`
-					} `json:"results"`
-				}
-				if json.NewDecoder(fResp.Body).Decode(&data) == nil {
-					pages := make([]AtlassianPage, 0, len(data.Results))
-					for _, p := range data.Results {
-						pages = append(pages, AtlassianPage{ID: p.ID, Title: p.Title})
-					}
-					return pages, nil
-				}
+		if fDoErr != nil {
+			break
+		}
+		if fResp.StatusCode != http.StatusOK {
+			fResp.Body.Close()
+			break
+		}
+		var data struct {
+			Results []struct {
+				ID    string `json:"id"`
+				Title string `json:"title"`
+			} `json:"results"`
+			Links struct {
+				Next string `json:"next"`
+			} `json:"_links"`
+		}
+		decErr := json.NewDecoder(fResp.Body).Decode(&data)
+		fResp.Body.Close()
+		if decErr != nil {
+			break
+		}
+		for _, p := range data.Results {
+			if p.ID != "" && !v1Seen[p.ID] {
+				v1Seen[p.ID] = true
+				v1Pages = append(v1Pages, AtlassianPage{ID: p.ID, Title: p.Title})
 			}
-			// 401/410: fall through to v2
+		}
+		if data.Links.Next != "" {
+			nextV1 = resolveConfluenceURL(cloudID, data.Links.Next)
+		} else {
+			nextV1 = ""
 		}
 	}
+	if len(v1Pages) > 0 {
+		sort.Slice(v1Pages, func(i, j int) bool {
+			ti, tj := strings.ToLower(v1Pages[i].Title), strings.ToLower(v1Pages[j].Title)
+			if ti != tj {
+				return ti < tj
+			}
+			return v1Pages[i].ID < v1Pages[j].ID
+		})
+		return v1Pages, nil
+	}
 
-	// 2. Try v2 API: GET /wiki/api/v2/spaces/{id}/pages (requires read:page:confluence)
+	// 3. Try v2 API: GET /wiki/api/v2/spaces/{id}/pages (requires read:page:confluence)
 	// Resolve space ID first
 	spaceID := spaceKey
 	sReq, sErr := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/api/v2/spaces?keys=%s", cloudID, url.QueryEscape(spaceKey)), nil)
@@ -924,7 +1112,6 @@ func (s *AtlassianService) ListSpacePages(ctx context.Context, userID, spaceKey 
 		sReq.Header.Set("Authorization", "Bearer "+accessToken)
 		sReq.Header.Set("Accept", "application/json")
 		if sResp, sDoErr := client.Do(sReq); sDoErr == nil {
-			defer sResp.Body.Close()
 			if sResp.StatusCode == http.StatusOK {
 				var sData struct {
 					Results []struct {
@@ -935,33 +1122,72 @@ func (s *AtlassianService) ListSpacePages(ctx context.Context, userID, spaceKey 
 					spaceID = sData.Results[0].ID
 				}
 			}
+			sResp.Body.Close()
 		}
 	}
 
-	pagesURL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/api/v2/spaces/%s/pages?limit=50", cloudID, url.PathEscape(spaceID))
-	pReq, err := http.NewRequestWithContext(ctx, "GET", pagesURL, nil)
-	if err == nil {
+	pagesURL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/api/v2/spaces/%s/pages?limit=100", cloudID, url.PathEscape(spaceID))
+	var v2Pages []AtlassianPage
+	v2Seen := make(map[string]bool)
+	nextV2 := pagesURL
+	prevV2 := ""
+	v2Count := 0
+	for nextV2 != "" && v2Count < 10 && len(v2Pages) < 1000 {
+		if nextV2 == prevV2 {
+			break
+		}
+		prevV2 = nextV2
+		v2Count++
+
+		pReq, err := http.NewRequestWithContext(ctx, "GET", nextV2, nil)
+		if err != nil {
+			break
+		}
 		pReq.Header.Set("Authorization", "Bearer "+accessToken)
 		pReq.Header.Set("Accept", "application/json")
 		pResp, pDoErr := client.Do(pReq)
-		if pDoErr == nil {
-			defer pResp.Body.Close()
-			if pResp.StatusCode == http.StatusOK {
-				var pData struct {
-					Results []struct {
-						ID    string `json:"id"`
-						Title string `json:"title"`
-					} `json:"results"`
-				}
-				if json.NewDecoder(pResp.Body).Decode(&pData) == nil {
-					pages := make([]AtlassianPage, 0, len(pData.Results))
-					for _, p := range pData.Results {
-						pages = append(pages, AtlassianPage{ID: p.ID, Title: p.Title})
-					}
-					return pages, nil
-				}
+		if pDoErr != nil {
+			break
+		}
+		if pResp.StatusCode != http.StatusOK {
+			pResp.Body.Close()
+			break
+		}
+		var pData struct {
+			Results []struct {
+				ID    string `json:"id"`
+				Title string `json:"title"`
+			} `json:"results"`
+			Links struct {
+				Next string `json:"next"`
+			} `json:"_links"`
+		}
+		decErr := json.NewDecoder(pResp.Body).Decode(&pData)
+		pResp.Body.Close()
+		if decErr != nil {
+			break
+		}
+		for _, p := range pData.Results {
+			if p.ID != "" && !v2Seen[p.ID] {
+				v2Seen[p.ID] = true
+				v2Pages = append(v2Pages, AtlassianPage{ID: p.ID, Title: p.Title})
 			}
 		}
+		if pData.Links.Next != "" {
+			nextV2 = resolveConfluenceURL(cloudID, pData.Links.Next)
+		} else {
+			nextV2 = ""
+		}
+	}
+	if len(v2Pages) > 0 {
+		sort.Slice(v2Pages, func(i, j int) bool {
+			ti, tj := strings.ToLower(v2Pages[i].Title), strings.ToLower(v2Pages[j].Title)
+			if ti != tj {
+				return ti < tj
+			}
+			return v2Pages[i].ID < v2Pages[j].ID
+		})
+		return v2Pages, nil
 	}
 
 	return []AtlassianPage{}, nil
@@ -1482,5 +1708,50 @@ func (s *AtlassianService) findExistingPageByTitle(ctx context.Context, client *
 
 	return "", fmt.Errorf("page titled %q not found in space %s", title, spaceKey)
 }
+
+// resolveConfluenceURL resolves relative or host-absolute pagination links returned by Confluence
+// to a fully qualified URL compatible with Atlassian Cloud OAuth 2.0 proxy.
+func resolveConfluenceURL(cloudID, rawLink string) string {
+	rawLink = strings.TrimSpace(rawLink)
+	if rawLink == "" {
+		return ""
+	}
+
+	if strings.HasPrefix(rawLink, "http://") || strings.HasPrefix(rawLink, "https://") {
+		u, err := url.Parse(rawLink)
+		if err == nil {
+			reqURI := u.RequestURI()
+			if strings.HasPrefix(u.Path, "/ex/confluence/") {
+				return "https://api.atlassian.com" + reqURI
+			}
+			if strings.HasPrefix(u.Path, "/wiki/") {
+				return fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s%s", cloudID, reqURI)
+			}
+			if strings.HasPrefix(u.Path, "/rest/") || strings.HasPrefix(u.Path, "/api/") {
+				return fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki%s", cloudID, reqURI)
+			}
+			if u.Host == "api.atlassian.com" {
+				return rawLink
+			}
+			if idx := strings.Index(u.Path, "/wiki/"); idx != -1 {
+				u.Path = u.Path[idx:]
+				return fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s%s", cloudID, u.RequestURI())
+			}
+			return fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki%s", cloudID, reqURI)
+		}
+	}
+
+	if strings.HasPrefix(rawLink, "/ex/confluence/") {
+		return "https://api.atlassian.com" + rawLink
+	}
+	if strings.HasPrefix(rawLink, "/wiki/") {
+		return fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s%s", cloudID, rawLink)
+	}
+	if strings.HasPrefix(rawLink, "/") {
+		return fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki%s", cloudID, rawLink)
+	}
+	return fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/%s", cloudID, rawLink)
+}
+
 
 
