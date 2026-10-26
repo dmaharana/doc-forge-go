@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"docforge/internal/config"
+	"docforge/internal/models"
 )
 
 func TestAtlassianScopes(t *testing.T) {
@@ -97,3 +98,65 @@ func TestListSpaces_MultiSite(t *testing.T) {
 		t.Errorf("expected to find INFRA space in site 2")
 	}
 }
+
+func TestFormatConfluencePageURL(t *testing.T) {
+	tests := []struct {
+		name     string
+		siteURL  string
+		spaceKey string
+		pageID   string
+		webUI    string
+		expected string
+	}{
+		{
+			name:     "mock site with spaceKey and pageID",
+			siteURL:  "https://mock-company.atlassian.net/wiki",
+			spaceKey: "ENG",
+			pageID:   "conf_12345",
+			webUI:    "",
+			expected: "https://mock-company.atlassian.net/wiki/spaces/ENG/pages/conf_12345",
+		},
+		{
+			name:     "site without /wiki suffix and v2 webUI relative path",
+			siteURL:  "https://acme.atlassian.net",
+			spaceKey: "PROJ",
+			pageID:   "9999",
+			webUI:    "/spaces/PROJ/pages/9999/Architecture+Spec",
+			expected: "https://acme.atlassian.net/wiki/spaces/PROJ/pages/9999/Architecture+Spec",
+		},
+		{
+			name:     "site with /wiki and webUI having /wiki prefix",
+			siteURL:  "https://acme.atlassian.net/wiki",
+			spaceKey: "PROJ",
+			pageID:   "9999",
+			webUI:    "/wiki/spaces/PROJ/pages/9999/Architecture+Spec",
+			expected: "https://acme.atlassian.net/wiki/spaces/PROJ/pages/9999/Architecture+Spec",
+		},
+		{
+			name:     "webUI is absolute URL",
+			siteURL:  "https://acme.atlassian.net",
+			spaceKey: "PROJ",
+			pageID:   "9999",
+			webUI:    "https://custom-domain.com/pages/viewpage.action?pageId=9999",
+			expected: "https://custom-domain.com/pages/viewpage.action?pageId=9999",
+		},
+		{
+			name:     "no spaceKey falls back to viewpage permalink",
+			siteURL:  "https://myteam.atlassian.net",
+			spaceKey: "",
+			pageID:   "54321",
+			webUI:    "",
+			expected: "https://myteam.atlassian.net/wiki/pages/viewpage.action?pageId=54321",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			actual := models.FormatConfluencePageURL(tc.siteURL, tc.spaceKey, tc.pageID, tc.webUI)
+			if actual != tc.expected {
+				t.Errorf("FormatConfluencePageURL() = %q, want %q", actual, tc.expected)
+			}
+		})
+	}
+}
+

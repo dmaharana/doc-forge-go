@@ -246,8 +246,8 @@ export const api = {
       override_parent_page_id?: string;
       set_as_project_default?: boolean;
     }
-  ): Promise<{ confluence_page_id: string; status: string }> {
-    return request<{ confluence_page_id: string; status: string }>(`/documents/${id}/export-confluence`, {
+  ): Promise<{ confluence_page_id: string; confluence_page_url?: string; status: string }> {
+    return request<{ confluence_page_id: string; confluence_page_url?: string; status: string }>(`/documents/${id}/export-confluence`, {
       method: 'POST',
       body: options ? JSON.stringify(options) : undefined,
     });

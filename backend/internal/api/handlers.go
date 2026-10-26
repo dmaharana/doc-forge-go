@@ -1264,7 +1264,7 @@ func (h *Handlers) ExportDocumentToConfluence(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	pageID, err := h.atlassian.PublishDocument(r.Context(), user.ID, doc.ProjectID, docID, spaceKey, parentPageID, cloudID)
+	pageID, pageURL, err := h.atlassian.PublishDocument(r.Context(), user.ID, doc.ProjectID, docID, spaceKey, parentPageID, cloudID)
 	if err != nil {
 		respondJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -1292,8 +1292,9 @@ func (h *Handlers) ExportDocumentToConfluence(w http.ResponseWriter, r *http.Req
 	}
 
 	respondJSON(w, http.StatusOK, map[string]string{
-		"confluence_page_id": pageID,
-		"status":             "published",
+		"confluence_page_id":  pageID,
+		"confluence_page_url": pageURL,
+		"status":              "published",
 	})
 }
 

@@ -240,6 +240,7 @@ func (db *DB) runMigrations() error {
 	_ = db.addColumnIfNotExists("confluence_targets", "cloud_id", "TEXT")
 	_ = db.addColumnIfNotExists("confluence_targets", "site_url", "TEXT")
 	_ = db.addColumnIfNotExists("confluence_targets", "site_name", "TEXT")
+	_ = db.addColumnIfNotExists("documents", "confluence_page_url", "TEXT")
 
 	// Migration 003: Chunking, FTS5 Virtual Table, Generation Stages
 	chunkingSchema := `

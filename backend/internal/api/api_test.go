@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -392,6 +393,39 @@ func TestEndToEndHappyPath(t *testing.T) {
 	router.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("confluence export by reviewer failed: %d, body: %s", w.Code, w.Body.String())
+	}
+	var exportResp map[string]string
+	_ = json.Unmarshal(w.Body.Bytes(), &exportResp)
+	if exportResp["confluence_page_url"] == "" {
+		t.Fatalf("expected non-empty confluence_page_url in export response, got: %v", exportResp)
+	}
+	if !strings.HasPrefix(exportResp["confluence_page_url"], "https://") {
+		t.Fatalf("expected confluence_page_url to start with https://, got: %s", exportResp["confluence_page_url"])
+	}
+
+	// Verify GetDocument returns confluence_page_url
+	req = httptest.NewRequest("GET", fmt.Sprintf("/api/v1/documents/%s", doc.ID), nil)
+	req.Header.Set("Authorization", reviewerAuthHeader)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	var fetchedDoc models.Document
+	_ = json.Unmarshal(w.Body.Bytes(), &fetchedDoc)
+	if fetchedDoc.ConfluencePageURL == nil || *fetchedDoc.ConfluencePageURL != exportResp["confluence_page_url"] {
+		t.Fatalf("expected fetched document to have confluence_page_url %q, got: %v", exportResp["confluence_page_url"], fetchedDoc.ConfluencePageURL)
+	}
+
+	// 18b. Republish Document to Confluence (updates existing page rather than erroring)
+	req = httptest.NewRequest("POST", fmt.Sprintf("/api/v1/documents/%s/export-confluence", doc.ID), nil)
+	req.Header.Set("Authorization", reviewerAuthHeader)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("confluence re-export/update failed: %d, body: %s", w.Code, w.Body.String())
+	}
+	var republishResp map[string]string
+	_ = json.Unmarshal(w.Body.Bytes(), &republishResp)
+	if republishResp["confluence_page_id"] != exportResp["confluence_page_id"] {
+		t.Fatalf("expected republish to preserve existing page ID %s, got %s", exportResp["confluence_page_id"], republishResp["confluence_page_id"])
 	}
 
 	// 19. Space Access Control Check: Attempt export to an unauthorized space

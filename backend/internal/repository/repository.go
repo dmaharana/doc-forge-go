@@ -642,15 +642,17 @@ func (r *Repository) CreateDocument(doc *models.Document, userID string) error {
 
 func (r *Repository) GetDocumentByID(id string) (*models.Document, error) {
 	query := `
-		SELECT id, generation_id, project_id, title, template_type, content_md, status, current_version_id, confluence_page_id, created_at, updated_at
-		FROM documents
-		WHERE id = ?
+		SELECT d.id, d.generation_id, d.project_id, d.title, d.template_type, d.content_md, d.status, d.current_version_id, d.confluence_page_id, d.confluence_page_url, d.created_at, d.updated_at, COALESCE(NULLIF(ct.site_url, ''), ac.site_url, '') AS site_url, ct.space_key
+		FROM documents d
+		LEFT JOIN confluence_targets ct ON ct.project_id = d.project_id
+		LEFT JOIN atlassian_connections ac ON ac.id = ct.connection_id
+		WHERE d.id = ?
 	`
 	row := r.db.QueryRow(query, id)
 
 	var d models.Document
-	var genID, curVerID, confPageID sql.NullString
-	err := row.Scan(&d.ID, &genID, &d.ProjectID, &d.Title, &d.TemplateType, &d.ContentMD, &d.Status, &curVerID, &confPageID, &d.CreatedAt, &d.UpdatedAt)
+	var genID, curVerID, confPageID, confPageURL, ctSiteURL, ctSpaceKey sql.NullString
+	err := row.Scan(&d.ID, &genID, &d.ProjectID, &d.Title, &d.TemplateType, &d.ContentMD, &d.Status, &curVerID, &confPageID, &confPageURL, &d.CreatedAt, &d.UpdatedAt, &ctSiteURL, &ctSpaceKey)
 	if err != nil {
 		return nil, err
 	}
@@ -663,6 +665,12 @@ func (r *Repository) GetDocumentByID(id string) (*models.Document, error) {
 	if confPageID.Valid {
 		d.ConfluencePageID = &confPageID.String
 	}
+	if confPageURL.Valid && confPageURL.String != "" {
+		d.ConfluencePageURL = &confPageURL.String
+	} else if confPageID.Valid && confPageID.String != "" && ctSiteURL.Valid && ctSiteURL.String != "" {
+		computedURL := models.FormatConfluencePageURL(ctSiteURL.String, ctSpaceKey.String, confPageID.String, "")
+		d.ConfluencePageURL = &computedURL
+	}
 
 	// Fetch versions
 	vRows, err := r.db.Query(`
@@ -673,7 +681,6 @@ func (r *Repository) GetDocumentByID(id string) (*models.Document, error) {
 		ORDER BY v.version_number DESC
 	`, d.ID)
 	if err == nil {
-		defer vRows.Close()
 		for vRows.Next() {
 			var v models.DocumentVersion
 			var cs sql.NullString
@@ -684,6 +691,7 @@ func (r *Repository) GetDocumentByID(id string) (*models.Document, error) {
 				d.Versions = append(d.Versions, v)
 			}
 		}
+		vRows.Close()
 	}
 
 	// Fetch feedback
@@ -695,7 +703,6 @@ func (r *Repository) GetDocumentByID(id string) (*models.Document, error) {
 		ORDER BY f.created_at DESC
 	`, d.ID)
 	if err == nil {
-		defer fbRows.Close()
 		for fbRows.Next() {
 			var f models.DocumentFeedback
 			var secAnchor sql.NullString
@@ -708,6 +715,7 @@ func (r *Repository) GetDocumentByID(id string) (*models.Document, error) {
 				d.Feedback = append(d.Feedback, f)
 			}
 		}
+		fbRows.Close()
 	}
 
 	if d.Versions == nil {
@@ -722,10 +730,12 @@ func (r *Repository) GetDocumentByID(id string) (*models.Document, error) {
 
 func (r *Repository) ListDocumentsByProject(projectID string) ([]models.Document, error) {
 	query := `
-		SELECT id, generation_id, project_id, title, template_type, content_md, status, current_version_id, confluence_page_id, created_at, updated_at
-		FROM documents
-		WHERE project_id = ?
-		ORDER BY updated_at DESC
+		SELECT d.id, d.generation_id, d.project_id, d.title, d.template_type, d.content_md, d.status, d.current_version_id, d.confluence_page_id, d.confluence_page_url, d.created_at, d.updated_at, COALESCE(NULLIF(ct.site_url, ''), ac.site_url, '') AS site_url, ct.space_key
+		FROM documents d
+		LEFT JOIN confluence_targets ct ON ct.project_id = d.project_id
+		LEFT JOIN atlassian_connections ac ON ac.id = ct.connection_id
+		WHERE d.project_id = ?
+		ORDER BY d.updated_at DESC
 	`
 	rows, err := r.db.Query(query, projectID)
 	if err != nil {
@@ -736,8 +746,8 @@ func (r *Repository) ListDocumentsByProject(projectID string) ([]models.Document
 	list := make([]models.Document, 0)
 	for rows.Next() {
 		var d models.Document
-		var genID, curVerID, confPageID sql.NullString
-		if err := rows.Scan(&d.ID, &genID, &d.ProjectID, &d.Title, &d.TemplateType, &d.ContentMD, &d.Status, &curVerID, &confPageID, &d.CreatedAt, &d.UpdatedAt); err != nil {
+		var genID, curVerID, confPageID, confPageURL, ctSiteURL, ctSpaceKey sql.NullString
+		if err := rows.Scan(&d.ID, &genID, &d.ProjectID, &d.Title, &d.TemplateType, &d.ContentMD, &d.Status, &curVerID, &confPageID, &confPageURL, &d.CreatedAt, &d.UpdatedAt, &ctSiteURL, &ctSpaceKey); err != nil {
 			return nil, err
 		}
 		if genID.Valid {
@@ -748,6 +758,12 @@ func (r *Repository) ListDocumentsByProject(projectID string) ([]models.Document
 		}
 		if confPageID.Valid {
 			d.ConfluencePageID = &confPageID.String
+		}
+		if confPageURL.Valid && confPageURL.String != "" {
+			d.ConfluencePageURL = &confPageURL.String
+		} else if confPageID.Valid && confPageID.String != "" && ctSiteURL.Valid && ctSiteURL.String != "" {
+			computedURL := models.FormatConfluencePageURL(ctSiteURL.String, ctSpaceKey.String, confPageID.String, "")
+			d.ConfluencePageURL = &computedURL
 		}
 		list = append(list, d)
 	}
@@ -810,8 +826,8 @@ func (r *Repository) UpdateDocumentStatus(id string, status models.DocumentStatu
 	return err
 }
 
-func (r *Repository) UpdateDocumentConfluencePage(id, pageID string) error {
-	_, err := r.db.Exec("UPDATE documents SET confluence_page_id = ?, updated_at = ? WHERE id = ?", pageID, time.Now().UTC(), id)
+func (r *Repository) UpdateDocumentConfluencePage(id, pageID, pageURL string) error {
+	_, err := r.db.Exec("UPDATE documents SET confluence_page_id = ?, confluence_page_url = ?, updated_at = ? WHERE id = ?", pageID, pageURL, time.Now().UTC(), id)
 	return err
 }
 

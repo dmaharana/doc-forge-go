@@ -1,6 +1,9 @@
 package models
 
 import (
+	"fmt"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -215,7 +218,8 @@ type Document struct {
 	ContentMD        string         `json:"content_md"`
 	Status           DocumentStatus `json:"status"`
 	CurrentVersionID *string        `json:"current_version_id,omitempty"`
-	ConfluencePageID *string        `json:"confluence_page_id,omitempty"`
+	ConfluencePageID  *string        `json:"confluence_page_id,omitempty"`
+	ConfluencePageURL *string        `json:"confluence_page_url,omitempty"`
 	CreatedAt        time.Time      `json:"created_at"`
 	UpdatedAt        time.Time      `json:"updated_at"`
 
@@ -311,4 +315,40 @@ type ProjectTokenSummary struct {
 	ByOperation       map[string]int    `json:"by_operation"`
 	RecentUsage       []TokenUsage      `json:"recent_usage"`
 }
+
+// FormatConfluencePageURL resolves the full canonical or permalink URL for a Confluence page.
+func FormatConfluencePageURL(siteURL, spaceKey, pageID, webUI string) string {
+	if strings.HasPrefix(webUI, "http://") || strings.HasPrefix(webUI, "https://") {
+		return webUI
+	}
+
+	base := strings.TrimRight(strings.TrimSpace(siteURL), "/")
+	if base == "" {
+		base = "https://confluence.atlassian.net"
+	}
+
+	// Atlassian Confluence Cloud URLs are rooted under /wiki
+	if !strings.HasSuffix(base, "/wiki") && !strings.Contains(base, "/wiki/") {
+		base = base + "/wiki"
+	}
+
+	if webUI != "" {
+		trimmedWebUI := "/" + strings.TrimLeft(strings.TrimSpace(webUI), "/")
+		if strings.HasPrefix(trimmedWebUI, "/wiki/") {
+			trimmedWebUI = strings.TrimPrefix(trimmedWebUI, "/wiki")
+		}
+		return base + trimmedWebUI
+	}
+
+	if spaceKey != "" && pageID != "" {
+		return fmt.Sprintf("%s/spaces/%s/pages/%s", base, url.PathEscape(spaceKey), url.PathEscape(pageID))
+	}
+
+	if pageID != "" {
+		return fmt.Sprintf("%s/pages/viewpage.action?pageId=%s", base, url.QueryEscape(pageID))
+	}
+
+	return base
+}
+
 

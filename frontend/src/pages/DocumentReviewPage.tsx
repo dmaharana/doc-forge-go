@@ -5,6 +5,7 @@ import { ArchitecturalDiagram } from '@/components/ArchitecturalDiagram';
 import type {
   AtlassianPage,
   AtlassianSpace,
+  ConfluenceTarget,
   DocumentItem,
   DocumentVersion,
   FeedbackCategory,
@@ -20,6 +21,7 @@ import {
   Clock,
   Download,
   Edit3,
+  ExternalLink,
   Eye,
   FileCheck2,
   History,
@@ -80,6 +82,7 @@ export const DocumentReviewPage: React.FC<DocumentReviewPageProps> = ({
 }) => {
   const [doc, setDoc] = useState<DocumentItem | null>(null);
   const [project, setProject] = useState<Project | null>(null);
+  const [confluenceTarget, setConfluenceTarget] = useState<ConfluenceTarget | null>(null);
   const [allDocs, setAllDocs] = useState<DocumentItem[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -138,14 +141,16 @@ export const DocumentReviewPage: React.FC<DocumentReviewPageProps> = ({
       setEditedTitle(documentData?.title || '');
       setSelectedVersion(null);
 
-      // Load project & siblings
+      // Load project, siblings, and confluence target
       if (documentData?.project_id) {
-        const [projData, projectDocs] = await Promise.all([
+        const [projData, projectDocs, targetData] = await Promise.all([
           api.getProject(documentData.project_id),
           api.listDocuments(documentData.project_id),
+          api.getProjectConfluenceTarget(documentData.project_id).catch(() => null),
         ]);
         setProject(projData);
         setAllDocs(projectDocs || []);
+        setConfluenceTarget(targetData);
       }
     } catch (err) {
       console.error(err);
@@ -181,6 +186,21 @@ export const DocumentReviewPage: React.FC<DocumentReviewPageProps> = ({
     }
     return list;
   }, [doc?.content_md]);
+
+  // Confluence Page URL (either direct from document or computed from project target)
+  const confluencePageUrl = useMemo(() => {
+    if (!doc?.confluence_page_id) return null;
+    if (doc.confluence_page_url) return doc.confluence_page_url;
+    if (confluenceTarget?.site_url) {
+      const base = confluenceTarget.site_url.replace(/\/+$/, '');
+      const wikiBase = base.endsWith('/wiki') || base.includes('/wiki/') ? base : `${base}/wiki`;
+      if (confluenceTarget.space_key) {
+        return `${wikiBase}/spaces/${encodeURIComponent(confluenceTarget.space_key)}/pages/${encodeURIComponent(doc.confluence_page_id)}`;
+      }
+      return `${wikiBase}/pages/viewpage.action?pageId=${encodeURIComponent(doc.confluence_page_id)}`;
+    }
+    return null;
+  }, [doc?.confluence_page_id, doc?.confluence_page_url, confluenceTarget]);
 
   // Filter feedback
   const feedbackList = doc?.feedback || [];
@@ -338,8 +358,17 @@ export const DocumentReviewPage: React.FC<DocumentReviewPageProps> = ({
             }
           : undefined
       );
-      setDoc((prev) => (prev ? { ...prev, confluence_page_id: res.confluence_page_id } : prev));
-      setToastMessage(`Exported to Confluence! Page ID: ${res.confluence_page_id}`);
+      const wasPublished = Boolean(doc.confluence_page_id);
+      setDoc((prev) => (prev ? {
+        ...prev,
+        confluence_page_id: res.confluence_page_id,
+        confluence_page_url: res.confluence_page_url,
+      } : prev));
+      setToastMessage(
+        wasPublished
+          ? `Updated Confluence page! Page ID: ${res.confluence_page_id}`
+          : `Exported to Confluence! Page ID: ${res.confluence_page_id}`
+      );
       setSpaceAccessDeniedData(null);
     } catch (err: any) {
       if (err.code === 'SPACE_ACCESS_DENIED') {
@@ -504,9 +533,23 @@ export const DocumentReviewPage: React.FC<DocumentReviewPageProps> = ({
                   Version: {selectedVersion ? `v${selectedVersion.version_number} (Historical)` : `v${currentVersionNumber}`}
                 </span>
                 {doc.confluence_page_id && (
-                  <span className="text-xs font-semibold px-2 py-0.5 rounded-md bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300 border border-blue-300 flex items-center gap-1">
-                    <Share2 className="h-3 w-3" /> Confluence Page: {doc.confluence_page_id}
-                  </span>
+                  confluencePageUrl ? (
+                    <a
+                      href={confluencePageUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title="Open page in Confluence (opens in a new tab)"
+                      className="text-xs font-semibold px-2 py-0.5 rounded-md bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300 border border-blue-300 hover:bg-blue-200 dark:hover:bg-blue-900 transition-colors flex items-center gap-1 cursor-pointer group shadow-sm"
+                    >
+                      <Share2 className="h-3 w-3" />
+                      <span>Confluence Page: {doc.confluence_page_id}</span>
+                      <ExternalLink className="h-3 w-3 opacity-70 group-hover:opacity-100 transition-opacity" />
+                    </a>
+                  ) : (
+                    <span className="text-xs font-semibold px-2 py-0.5 rounded-md bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300 border border-blue-300 flex items-center gap-1">
+                      <Share2 className="h-3 w-3" /> Confluence Page: {doc.confluence_page_id}
+                    </span>
+                  )
                 )}
               </div>
               <h1 className="text-xl font-black text-foreground truncate">{doc.title}</h1>
@@ -773,15 +816,17 @@ export const DocumentReviewPage: React.FC<DocumentReviewPageProps> = ({
                 {doc.status === 'approved' ? 'Approved' : 'Approve Document'}
               </button>
 
-              {/* Export to Confluence */}
+              {/* Export / Update Confluence */}
               <button
                 onClick={() => handleExportConfluence()}
                 disabled={exportingConfluence || doc.status !== 'approved'}
-                className="px-3.5 py-2 rounded-lg border text-xs font-semibold hover:bg-muted flex items-center gap-1.5 disabled:opacity-40"
+                className="px-3.5 py-2 rounded-lg border text-xs font-semibold hover:bg-muted flex items-center gap-1.5 disabled:opacity-40 transition"
                 title={doc.status !== 'approved' ? 'Approve document first before publishing' : ''}
               >
                 <Share2 className="h-3.5 w-3.5" />
-                {exportingConfluence ? 'Publishing...' : 'Export to Confluence'}
+                {exportingConfluence
+                  ? (doc.confluence_page_id ? 'Updating Confluence...' : 'Publishing...')
+                  : (doc.confluence_page_id ? 'Update in Confluence' : 'Export to Confluence')}
               </button>
             </div>
           </footer>

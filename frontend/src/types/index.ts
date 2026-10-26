@@ -170,6 +170,7 @@ export interface DocumentItem {
   status: DocumentStatus;
   current_version_id?: string;
   confluence_page_id?: string;
+  confluence_page_url?: string;
   created_at: string;
   updated_at: string;
   versions?: DocumentVersion[];

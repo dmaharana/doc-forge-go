@@ -967,10 +967,10 @@ func (s *AtlassianService) ListSpacePages(ctx context.Context, userID, spaceKey 
 	return []AtlassianPage{}, nil
 }
 
-func (s *AtlassianService) PublishDocument(ctx context.Context, userID, projectID, documentID, overrideSpaceKey, overrideParentPageID string, cloudIDOpt ...string) (string, error) {
+func (s *AtlassianService) PublishDocument(ctx context.Context, userID, projectID, documentID, overrideSpaceKey, overrideParentPageID string, cloudIDOpt ...string) (string, string, error) {
 	doc, err := s.repo.GetDocumentByID(documentID)
 	if err != nil {
-		return "", fmt.Errorf("document not found: %w", err)
+		return "", "", fmt.Errorf("document not found: %w", err)
 	}
 
 	cloudID := ""
@@ -985,7 +985,7 @@ func (s *AtlassianService) PublishDocument(ctx context.Context, userID, projectI
 
 	if spaceKey == "" {
 		if target == nil {
-			return "", fmt.Errorf("no confluence target configured for project")
+			return "", "", fmt.Errorf("no confluence target configured for project")
 		}
 		spaceKey = target.SpaceKey
 		parentPageID = target.ParentPageID
@@ -998,7 +998,7 @@ func (s *AtlassianService) PublishDocument(ctx context.Context, userID, projectI
 	conn, err := s.repo.GetAtlassianConnectionByUserID(userID)
 	if err != nil || conn == nil {
 		if !s.IsMockMode() {
-			return "", fmt.Errorf("no active atlassian connection for user")
+			return "", "", fmt.Errorf("no active atlassian connection for user")
 		}
 	}
 
@@ -1009,22 +1009,48 @@ func (s *AtlassianService) PublishDocument(ctx context.Context, userID, projectI
 	// Verify that user has access to this space
 	hasAccess, err := s.CheckSpaceAccess(ctx, userID, spaceKey, cloudID)
 	if err == nil && !hasAccess {
-		return "", fmt.Errorf("access denied: user does not have permission to publish to Confluence space '%s'", spaceKey)
+		return "", "", fmt.Errorf("access denied: user does not have permission to publish to Confluence space '%s'", spaceKey)
+	}
+
+	siteURL := ""
+	if target != nil && target.SiteURL != "" {
+		siteURL = target.SiteURL
+	} else if conn != nil && conn.SiteURL != "" {
+		siteURL = conn.SiteURL
+	} else if sites, err := s.GetAccessibleSites(ctx, userID); err == nil {
+		for _, st := range sites {
+			if st.ID == cloudID {
+				siteURL = st.URL
+				break
+			}
+		}
+	}
+	if siteURL == "" && (s.IsMockMode() || cloudID == "mock-cloud-id-123" || cloudID == "mock-cloud-id-456" || (conn != nil && conn.CloudID == "mock-cloud-id-123")) {
+		siteURL = "https://mock-company.atlassian.net/wiki"
+	}
+
+	existingPageID := ""
+	if doc.ConfluencePageID != nil && strings.TrimSpace(*doc.ConfluencePageID) != "" {
+		existingPageID = strings.TrimSpace(*doc.ConfluencePageID)
 	}
 
 	if s.IsMockMode() || cloudID == "mock-cloud-id-123" || cloudID == "mock-cloud-id-456" || (conn != nil && conn.CloudID == "mock-cloud-id-123") {
-		pageID := fmt.Sprintf("conf_%d", time.Now().Unix())
-		_ = s.repo.UpdateDocumentConfluencePage(documentID, pageID)
-		return pageID, nil
+		pageID := existingPageID
+		if pageID == "" {
+			pageID = fmt.Sprintf("conf_%d", time.Now().Unix())
+		}
+		pageURL := models.FormatConfluencePageURL(siteURL, spaceKey, pageID, "")
+		_ = s.repo.UpdateDocumentConfluencePage(documentID, pageID, pageURL)
+		return pageID, pageURL, nil
 	}
 
 	if strings.TrimSpace(cloudID) == "" {
-		return "", fmt.Errorf("no Confluence Cloud site is linked to your Atlassian session")
+		return "", "", fmt.Errorf("no Confluence Cloud site is linked to your Atlassian session")
 	}
 
 	accessToken, err := s.getValidAccessToken(ctx, conn)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
@@ -1033,6 +1059,15 @@ func (s *AtlassianService) PublishDocument(ctx context.Context, userID, projectI
 	storageBody, err := MarkdownToConfluenceStorage(doc.ContentMD)
 	if err != nil {
 		storageBody = fmt.Sprintf("<pre>%s</pre>", html.EscapeString(doc.ContentMD))
+	}
+
+	// 0. If document is already published, update the existing Confluence page directly
+	if existingPageID != "" {
+		pageID, pageURL, err := s.updateExistingPage(ctx, client, accessToken, cloudID, siteURL, spaceKey, documentID, existingPageID, doc.Title, storageBody)
+		if err == nil {
+			return pageID, pageURL, nil
+		}
+		log.Printf("[CONFLUENCE] Failed to update existing page %s: %v. Falling back to search/recreate.", existingPageID, err)
 	}
 
 	// 1. Try Confluence REST API v2: POST /wiki/api/v2/pages (Standard modern Cloud API)
@@ -1174,11 +1209,15 @@ func (s *AtlassianService) PublishDocument(ctx context.Context, userID, projectI
 				v2ErrBody = string(b2)
 				if resp2.StatusCode < 300 {
 					var res2 struct {
-						ID string `json:"id"`
+						ID    string `json:"id"`
+						Links struct {
+							WebUI string `json:"webui"`
+						} `json:"_links"`
 					}
 					if json.Unmarshal(b2, &res2) == nil && res2.ID != "" {
-						_ = s.repo.UpdateDocumentConfluencePage(documentID, res2.ID)
-						return res2.ID, nil
+						pageURL := models.FormatConfluencePageURL(siteURL, spaceKey, res2.ID, res2.Links.WebUI)
+						_ = s.repo.UpdateDocumentConfluencePage(documentID, res2.ID, pageURL)
+						return res2.ID, pageURL, nil
 					}
 				}
 			}
@@ -1215,11 +1254,20 @@ func (s *AtlassianService) PublishDocument(ctx context.Context, userID, projectI
 			v1ErrBody = string(b1)
 			if resp1.StatusCode < 300 {
 				var res1 struct {
-					ID string `json:"id"`
+					ID    string `json:"id"`
+					Links struct {
+						WebUI string `json:"webui"`
+						Base  string `json:"base"`
+					} `json:"_links"`
 				}
 				if json.Unmarshal(b1, &res1) == nil && res1.ID != "" {
-					_ = s.repo.UpdateDocumentConfluencePage(documentID, res1.ID)
-					return res1.ID, nil
+					usedSiteURL := siteURL
+					if res1.Links.Base != "" {
+						usedSiteURL = res1.Links.Base
+					}
+					pageURL := models.FormatConfluencePageURL(usedSiteURL, spaceKey, res1.ID, res1.Links.WebUI)
+					_ = s.repo.UpdateDocumentConfluencePage(documentID, res1.ID, pageURL)
+					return res1.ID, pageURL, nil
 				}
 			}
 		}
@@ -1227,23 +1275,212 @@ func (s *AtlassianService) PublishDocument(ctx context.Context, userID, projectI
 
 	// 3. Handle specific common errors with actionable guidance
 	if v2StatusCode == http.StatusConflict || v1StatusCode == http.StatusConflict {
-		return "", fmt.Errorf("confluence publish error (409 Conflict): a page titled %q already exists in space %q. Please choose a different title or delete the existing page in Confluence", doc.Title, spaceKey)
+		// A page with this title already exists in the space: find its ID and update it!
+		if foundID, findErr := s.findExistingPageByTitle(ctx, client, accessToken, cloudID, spaceKey, doc.Title); findErr == nil && foundID != "" {
+			pageID, pageURL, updateErr := s.updateExistingPage(ctx, client, accessToken, cloudID, siteURL, spaceKey, documentID, foundID, doc.Title, storageBody)
+			if updateErr == nil {
+				return pageID, pageURL, nil
+			}
+			log.Printf("[CONFLUENCE] Found existing page %s for title %q but update failed: %v", foundID, doc.Title, updateErr)
+		}
+		return "", "", fmt.Errorf("confluence publish error (409 Conflict): a page titled %q already exists in space %q. Please choose a different title or delete the existing page in Confluence", doc.Title, spaceKey)
 	}
 	if v2StatusCode == http.StatusForbidden || v1StatusCode == http.StatusForbidden {
-		return "", fmt.Errorf("confluence publish error (403 Forbidden): your Atlassian user account does not have permission to add pages in space %q. Please check your Confluence space permissions", spaceKey)
+		return "", "", fmt.Errorf("confluence publish error (403 Forbidden): your Atlassian user account does not have permission to add pages in space %q. Please check your Confluence space permissions", spaceKey)
 	}
 	if (v1StatusCode == http.StatusGone || v1StatusCode == 0) && (v2StatusCode == http.StatusUnauthorized || v2StatusCode == 0) {
-		return "", fmt.Errorf("confluence publish error: Atlassian Cloud has permanently retired the legacy v1 content creation API (HTTP 410 Gone) and strictly requires the granular scope 'write:page:confluence' to create pages via the modern v2 API. Please enable 'write:page:confluence' (and 'read:page:confluence', 'read:space:confluence') under Permissions -> Confluence API -> Granular scopes in your app at developer.atlassian.com/console/myapps, then reconnect Atlassian in DocForge")
+		return "", "", fmt.Errorf("confluence publish error: Atlassian Cloud has permanently retired the legacy v1 content creation API (HTTP 410 Gone) and strictly requires the granular scope 'write:page:confluence' to create pages via the modern v2 API. Please enable 'write:page:confluence' (and 'read:page:confluence', 'read:space:confluence') under Permissions -> Confluence API -> Granular scopes in your app at developer.atlassian.com/console/myapps, then reconnect Atlassian in DocForge")
 	}
 
 	if v2StatusCode > 0 {
-		return "", fmt.Errorf("confluence publish error (%d): %s", v2StatusCode, strings.TrimSpace(v2ErrBody))
+		return "", "", fmt.Errorf("confluence publish error (%d): %s", v2StatusCode, strings.TrimSpace(v2ErrBody))
 	}
 	if v1StatusCode > 0 {
-		return "", fmt.Errorf("confluence publish error (%d): %s", v1StatusCode, strings.TrimSpace(v1ErrBody))
+		return "", "", fmt.Errorf("confluence publish error (%d): %s", v1StatusCode, strings.TrimSpace(v1ErrBody))
 	}
 
-	return "", fmt.Errorf("confluence publish failed: could not connect to Confluence Cloud API")
+	return "", "", fmt.Errorf("confluence publish failed: could not connect to Confluence Cloud API")
+}
+
+func (s *AtlassianService) updateExistingPage(ctx context.Context, client *http.Client, accessToken, cloudID, siteURL, spaceKey, documentID, pageID, title, storageBody string) (string, string, error) {
+	// 1. Try Confluence REST API v2: PUT /wiki/api/v2/pages/{id}
+	// First fetch current version
+	v2GetURL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/api/v2/pages/%s", cloudID, url.PathEscape(pageID))
+	var currentVersion int
+	if getReq, err := http.NewRequestWithContext(ctx, "GET", v2GetURL, nil); err == nil {
+		getReq.Header.Set("Authorization", "Bearer "+accessToken)
+		getReq.Header.Set("Accept", "application/json")
+		if getResp, doErr := client.Do(getReq); doErr == nil {
+			defer getResp.Body.Close()
+			if getResp.StatusCode == http.StatusOK {
+				var getData struct {
+					Status  string `json:"status"`
+					Version struct {
+						Number int `json:"number"`
+					} `json:"version"`
+				}
+				if json.NewDecoder(getResp.Body).Decode(&getData) == nil && getData.Version.Number > 0 {
+					currentVersion = getData.Version.Number
+				}
+			}
+		}
+	}
+
+	if currentVersion > 0 {
+		nextVersion := currentVersion + 1
+		v2PutPayload := map[string]any{
+			"id":     pageID,
+			"status": "current",
+			"title":  title,
+			"body": map[string]any{
+				"representation": "storage",
+				"value":          storageBody,
+			},
+			"version": map[string]any{
+				"number":  nextVersion,
+				"message": "Updated via DocForge",
+			},
+		}
+		v2PutBytes, _ := json.Marshal(v2PutPayload)
+		v2PutURL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/api/v2/pages/%s", cloudID, url.PathEscape(pageID))
+		if putReq, putErr := http.NewRequestWithContext(ctx, "PUT", v2PutURL, bytes.NewReader(v2PutBytes)); putErr == nil {
+			putReq.Header.Set("Authorization", "Bearer "+accessToken)
+			putReq.Header.Set("Content-Type", "application/json")
+			putReq.Header.Set("Accept", "application/json")
+			if putResp, putDoErr := client.Do(putReq); putDoErr == nil {
+				defer putResp.Body.Close()
+				if putResp.StatusCode < 300 {
+					var putRes struct {
+						ID    string `json:"id"`
+						Links struct {
+							WebUI string `json:"webui"`
+						} `json:"_links"`
+					}
+					if json.NewDecoder(putResp.Body).Decode(&putRes) == nil && putRes.ID != "" {
+						pageURL := models.FormatConfluencePageURL(siteURL, spaceKey, putRes.ID, putRes.Links.WebUI)
+						_ = s.repo.UpdateDocumentConfluencePage(documentID, putRes.ID, pageURL)
+						return putRes.ID, pageURL, nil
+					}
+				}
+			}
+		}
+	}
+
+	// 2. Fallback: Try Confluence REST API v1: PUT /wiki/rest/api/content/{id}
+	v1GetURL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/rest/api/content/%s?expand=version", cloudID, url.PathEscape(pageID))
+	var v1Version int
+	if getReq1, err := http.NewRequestWithContext(ctx, "GET", v1GetURL, nil); err == nil {
+		getReq1.Header.Set("Authorization", "Bearer "+accessToken)
+		getReq1.Header.Set("Accept", "application/json")
+		if getResp1, doErr := client.Do(getReq1); doErr == nil {
+			defer getResp1.Body.Close()
+			if getResp1.StatusCode == http.StatusOK {
+				var getData1 struct {
+					Version struct {
+						Number int `json:"number"`
+					} `json:"version"`
+				}
+				if json.NewDecoder(getResp1.Body).Decode(&getData1) == nil && getData1.Version.Number > 0 {
+					v1Version = getData1.Version.Number
+				}
+			}
+		}
+	}
+
+	if v1Version > 0 {
+		nextVersion := v1Version + 1
+		v1PutPayload := map[string]any{
+			"id":    pageID,
+			"type":  "page",
+			"title": title,
+			"space": map[string]string{"key": spaceKey},
+			"body": map[string]any{
+				"storage": map[string]string{
+					"value":          storageBody,
+					"representation": "storage",
+				},
+			},
+			"version": map[string]any{
+				"number":  nextVersion,
+				"message": "Updated via DocForge",
+			},
+		}
+		v1PutBytes, _ := json.Marshal(v1PutPayload)
+		v1PutURL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/rest/api/content/%s", cloudID, url.PathEscape(pageID))
+		if putReq1, putErr1 := http.NewRequestWithContext(ctx, "PUT", v1PutURL, bytes.NewReader(v1PutBytes)); putErr1 == nil {
+			putReq1.Header.Set("Authorization", "Bearer "+accessToken)
+			putReq1.Header.Set("Content-Type", "application/json")
+			putReq1.Header.Set("Accept", "application/json")
+			if putResp1, putDoErr1 := client.Do(putReq1); putDoErr1 == nil {
+				defer putResp1.Body.Close()
+				if putResp1.StatusCode < 300 {
+					var putRes1 struct {
+						ID    string `json:"id"`
+						Links struct {
+							WebUI string `json:"webui"`
+							Base  string `json:"base"`
+						} `json:"_links"`
+					}
+					if json.NewDecoder(putResp1.Body).Decode(&putRes1) == nil && putRes1.ID != "" {
+						usedSiteURL := siteURL
+						if putRes1.Links.Base != "" {
+							usedSiteURL = putRes1.Links.Base
+						}
+						pageURL := models.FormatConfluencePageURL(usedSiteURL, spaceKey, putRes1.ID, putRes1.Links.WebUI)
+						_ = s.repo.UpdateDocumentConfluencePage(documentID, putRes1.ID, pageURL)
+						return putRes1.ID, pageURL, nil
+					}
+				}
+			}
+		}
+	}
+
+	return "", "", fmt.Errorf("failed to update Confluence page %s", pageID)
+}
+
+func (s *AtlassianService) findExistingPageByTitle(ctx context.Context, client *http.Client, accessToken, cloudID, spaceKey, title string) (string, error) {
+	// Try CQL search
+	cql := fmt.Sprintf(`space = %q AND title = %q AND type = page`, spaceKey, title)
+	searchURL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/rest/api/content/search?cql=%s&limit=1", cloudID, url.QueryEscape(cql))
+	if req, err := http.NewRequestWithContext(ctx, "GET", searchURL, nil); err == nil {
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		req.Header.Set("Accept", "application/json")
+		if resp, doErr := client.Do(req); doErr == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				var data struct {
+					Results []struct {
+						ID string `json:"id"`
+					} `json:"results"`
+				}
+				if json.NewDecoder(resp.Body).Decode(&data) == nil && len(data.Results) > 0 && data.Results[0].ID != "" {
+					return data.Results[0].ID, nil
+				}
+			}
+		}
+	}
+
+	// Fallback: Try v2 title search
+	v2SearchURL := fmt.Sprintf("https://api.atlassian.com/ex/confluence/%s/wiki/api/v2/pages?title=%s&limit=5", cloudID, url.QueryEscape(title))
+	if req2, err2 := http.NewRequestWithContext(ctx, "GET", v2SearchURL, nil); err2 == nil {
+		req2.Header.Set("Authorization", "Bearer "+accessToken)
+		req2.Header.Set("Accept", "application/json")
+		if resp2, doErr2 := client.Do(req2); doErr2 == nil {
+			defer resp2.Body.Close()
+			if resp2.StatusCode == http.StatusOK {
+				var data2 struct {
+					Results []struct {
+						ID string `json:"id"`
+					} `json:"results"`
+				}
+				if json.NewDecoder(resp2.Body).Decode(&data2) == nil && len(data2.Results) > 0 && data2.Results[0].ID != "" {
+					return data2.Results[0].ID, nil
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("page titled %q not found in space %s", title, spaceKey)
 }
 
 
